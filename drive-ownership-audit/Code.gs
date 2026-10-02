@@ -68,13 +68,14 @@ function removeTriggers() {
     .forEach(t => ScriptApp.deleteTrigger(t));
 }
 
-/* ===================== BƯỚC 0: CHỌN THƯ MỤC =====================
+/* ===================== BƯỚC 1: CHỌN THƯ MỤC =====================
  * Quét cấu trúc thư mục bạn sở hữu ra tab "Chọn thư mục" (chỉ thư mục, rất nhanh).
  * Bạn tick ô "Chọn" ở thư mục muốn rà soát; thư mục con tự động được tính theo.
  */
 
 const SHEET_FOLDERS = 'Chọn thư mục';
-const FOLDER_HEADERS = ['Chọn', 'Thư mục', 'Đường dẫn', 'Link', 'Folder ID', 'Parent ID'];
+const FOLDER_HEADERS = ['Chọn', 'Thư mục', 'Đường dẫn', 'Kết quả quét', 'Quét lúc', 'Link', 'Folder ID', 'Parent ID'];
+const FC = FOLDER_HEADERS.reduce((m, h, i) => { m[h] = i; return m; }, {});
 
 function scanFolders() {
   scanFolders_();
@@ -86,11 +87,15 @@ function scanFolders_() {
   progress_('Đang đọc cấu trúc thư mục bạn sở hữu...');
   const sheet = getSheet_(SHEET_FOLDERS, FOLDER_HEADERS);
 
-  // Giữ lại các ô đã tick từ lần trước.
-  const checked = new Set();
+  // Giữ lại ô đã tick và kết quả quét từ lần trước (tìm cột theo tên, chịu được bản cũ).
+  const old = {};
   if (sheet.getLastRow() > 1) {
-    sheet.getRange(2, 1, sheet.getLastRow() - 1, 5).getValues()
-      .forEach(r => { if (r[0] === true) checked.add(r[4]); });
+    const data = sheet.getDataRange().getValues();
+    const h = data[0];
+    const iId = h.indexOf('Folder ID'), iRes = h.indexOf('Kết quả quét'), iAt = h.indexOf('Quét lúc');
+    data.slice(1).forEach(r => {
+      old[r[iId]] = [r[0] === true, iRes >= 0 ? r[iRes] : '', iAt >= 0 ? r[iAt] : ''];
+    });
   }
 
   const info = {};
@@ -106,25 +111,17 @@ function scanFolders_() {
     pageToken = res.nextPageToken;
   } while (pageToken);
 
-  const pathOf = {};
-  const getPath = id => {
-    if (pathOf[id]) return pathOf[id];
-    const f = info[id];
-    const seen = [];
-    let cur = f.parent;
-    const chain = [f.name];
-    while (cur && info[cur] && seen.length < 50) { chain.unshift(info[cur].name); seen.push(cur); cur = info[cur].parent; }
-    return (pathOf[id] = chain);
-  };
-
   const rows = Object.keys(info).map(id => {
-    const path = getPath(id);
+    const chain = [info[id].name];
+    let cur = info[id].parent;
+    while (cur && info[cur] && chain.length < 50) { chain.unshift(info[cur].name); cur = info[cur].parent; }
+    const prev = old[id] || [false, '', ''];
     return [
-      checked.has(id), '　'.repeat(path.length - 1) + info[id].name, path.join(' / '),
+      prev[0], '　'.repeat(chain.length - 1) + info[id].name, chain.join(' / '), prev[1], prev[2],
       'https://drive.google.com/drive/folders/' + id, id, info[id].parent,
     ];
   });
-  rows.sort((a, b) => a[2].localeCompare(b[2], 'vi'));
+  rows.sort((a, b) => a[FC['Đường dẫn']].localeCompare(b[FC['Đường dẫn']], 'vi'));
 
   sheet.clear();
   sheet.getRange(1, 1, 1, FOLDER_HEADERS.length).setValues([FOLDER_HEADERS]).setFontWeight('bold');
@@ -133,23 +130,24 @@ function scanFolders_() {
     sheet.getRange(2, 1, rows.length, FOLDER_HEADERS.length).setValues(rows);
     sheet.getRange(2, 1, rows.length, 1).insertCheckboxes();
   }
-  sheet.hideColumns(5, 2);
+  sheet.hideColumns(FC['Folder ID'] + 1, 2);
   return rows.length;
 }
 
-/** Cây thư mục bạn sở hữu: parentId -> [[id, name], ...], và danh sách thư mục đã tick. */
+/** Đọc tab "Chọn thư mục" (luôn đọc mới -> phản ánh ô tick tại thời điểm gọi). */
 function loadFolderTree_() {
   const sheet = getSpreadsheet_().getSheetByName(SHEET_FOLDERS);
-  const children = {};
-  const selected = [];
-  if (sheet && sheet.getLastRow() > 1) {
-    sheet.getRange(2, 1, sheet.getLastRow() - 1, FOLDER_HEADERS.length).getValues().forEach(r => {
-      const id = r[4], parent = r[5], name = String(r[1]).replace(/^\u3000+/, '');
-      (children[parent] = children[parent] || []).push([id, name]);
-      if (r[0] === true) selected.push([id, name]);
-    });
-  }
-  return { children: children, selected: selected };
+  const tree = { children: {}, parent: {}, name: {}, selected: [], isSelected: new Set() };
+  if (!sheet || sheet.getLastRow() < 2) return tree;
+  sheet.getRange(2, 1, sheet.getLastRow() - 1, FOLDER_HEADERS.length).getValues().forEach(r => {
+    const id = r[FC['Folder ID']], parent = r[FC['Parent ID']];
+    const name = String(r[FC['Thư mục']]).replace(/^　+/, '');
+    tree.name[id] = name;
+    tree.parent[id] = parent;
+    (tree.children[parent] = tree.children[parent] || []).push([id, name]);
+    if (r[0] === true) { tree.selected.push(id); tree.isSelected.add(id); }
+  });
+  return tree;
 }
 
 /** Thêm toàn bộ thư mục con (bạn sở hữu) của các thư mục đầu vào. */
@@ -166,10 +164,27 @@ function expandFolders_(start, children, seen) {
   return out;
 }
 
-/* ===================== BƯỚC 1 + 2: QUÉT (tự chia nhiều lượt) =====================
- * Drive lớn không quét xong trong 1 lần (giới hạn 6 phút, giới hạn bộ nhớ), nên:
- * - Hàng đợi thư mục cần quét nằm ở tab ẩn "_Hàng đợi".
- * - File tìm được ghi ngay vào tab ẩn "_Kết quả quét", không giữ trong bộ nhớ.
+/** Thư mục cha/ông đã được chọn (hoặc đã quét) -> thư mục này nằm trong lượt quét của cha, bỏ qua. */
+function coveredByAncestor_(id, tree, done) {
+  let cur = tree.parent[id];
+  for (let i = 0; cur && i < 50; i++, cur = tree.parent[cur]) {
+    if (tree.isSelected.has(cur) || done.indexOf(cur) >= 0) return true;
+  }
+  return false;
+}
+
+function setFolderResult_(id, text, at) {
+  const sheet = getSpreadsheet_().getSheetByName(SHEET_FOLDERS);
+  if (!sheet || sheet.getLastRow() < 2) return;
+  const ids = sheet.getRange(2, FC['Folder ID'] + 1, sheet.getLastRow() - 1, 1).getValues();
+  const i = ids.findIndex(r => r[0] === id);
+  if (i >= 0) sheet.getRange(i + 2, FC['Kết quả quét'] + 1, 1, 2).setValues([[text, at || '']]);
+}
+
+/* ===================== BƯỚC 2: QUÉT FILE (lần lượt từng thư mục đã chọn) =====================
+ * - Quét từng thư mục đã tick, theo thứ tự trong tab "Chọn thư mục".
+ * - Trước mỗi thư mục (và giữa chừng) đọc lại ô tick: bỏ tick -> bỏ qua/dừng; tick thêm -> quét luôn.
+ * - Hàng đợi thư mục con nằm ở tab ẩn "_Hàng đợi"; file tìm được ghi ngay vào tab ẩn "_Kết quả quét".
  * - Gần hết giờ thì lưu vị trí, hẹn 1 phút sau tự chạy tiếp (continueScan).
  * - Quét xong thì gộp kết quả vào tab "Danh sách".
  */
@@ -177,7 +192,7 @@ function expandFolders_(start, children, seen) {
 const SHEET_QUEUE = '_Hàng đợi';
 const SHEET_TEMP = '_Kết quả quét';
 const QUEUE_HEADERS = ['Folder ID', 'Tên thư mục'];
-const TEMP_HEADERS = ['File ID', 'Tên file', 'Loại', 'Link', 'Chủ sở hữu', 'Email chủ sở hữu', 'Thư mục chứa'];
+const TEMP_HEADERS = ['File ID', 'Tên file', 'Loại', 'Link', 'Chủ sở hữu', 'Email chủ sở hữu', 'Thư mục chứa', 'Thư mục gốc ID'];
 const STATE_KEY = 'SCAN_STATE';
 const PARENT_CHUNK = 40; // số thư mục gộp trong 1 lần hỏi Drive
 const ITEM_FIELDS = 'id,name,mimeType,parents,webViewLink,owners(displayName,emailAddress)';
@@ -196,21 +211,19 @@ function startScan_(remindAfter) {
   let started = false;
   try {
     clearContinueTriggers_();
-    getSheet_(CONFIG.SHEET_FILES, HEADERS);
-    const queue = resetSheet_(SHEET_QUEUE, QUEUE_HEADERS);
-    resetSheet_(SHEET_TEMP, TEMP_HEADERS);
     const tree = loadFolderTree_();
     if (!tree.selected.length) {
       notify_('Chưa chọn thư mục nào. Chạy "1. Quét cấu trúc thư mục" rồi tick ô "Chọn" ở tab ' + SHEET_FOLDERS + '.');
       return;
     }
-    const folders = expandFolders_(tree.selected, tree.children, new Set());
-    appendRows_(queue, folders);
-    const total = folders.length;
-    progress_(`Bước 1/3: ${tree.selected.length} thư mục đã chọn, tổng ${total} thư mục kể cả thư mục con.`);
+    getSheet_(CONFIG.SHEET_FILES, HEADERS);
+    resetSheet_(SHEET_QUEUE, QUEUE_HEADERS);
+    resetSheet_(SHEET_TEMP, TEMP_HEADERS);
+    tree.selected.forEach(id => setFolderResult_(id,
+      coveredByAncestor_(id, tree, []) ? 'Đã gồm trong thư mục cha được chọn' : 'Chờ quét'));
 
-    saveState_({ pos: 0, n: 0, pageToken: null, found: 0, remindAfter: remindAfter, runs: 0 });
-    log_('Quét', '', 0, `Bắt đầu quét: ${tree.selected.length} thư mục đã chọn (${total} kể cả thư mục con)`);
+    saveState_({ done: [], current: null, pos: 0, n: 0, pageToken: null, found: 0, curFound: 0, remindAfter: remindAfter });
+    log_('Quét', '', 0, `Bắt đầu quét ${tree.selected.length} thư mục đã chọn`);
     started = true;
   } finally {
     lock.releaseLock();
@@ -227,19 +240,46 @@ function continueScan() {
   try {
     state = loadState_();
     if (!state) return;
-    state.runs++;
     const startedAt = Date.now();
     const ss = getSpreadsheet_();
     const queue = ss.getSheetByName(SHEET_QUEUE);
     const temp = ss.getSheetByName(SHEET_TEMP);
-    const tree = loadFolderTree_();
 
     while (true) {
-      const totalFolders = queue.getLastRow() - 1;
-      if (!state.pageToken) {
-        if (state.pos >= totalFolders) break;
-        state.n = Math.min(PARENT_CHUNK, totalFolders - state.pos);
+      const tree = loadFolderTree_(); // đọc lại ô tick mỗi vòng
+
+      // Thư mục đang quét vừa bị bỏ tick -> dừng, kết quả của nó sẽ không được tính.
+      if (state.current && !tree.isSelected.has(state.current.id)) {
+        setFolderResult_(state.current.id, 'Đã bỏ chọn, dừng quét', new Date());
+        state.current = null;
+        state.pageToken = null;
       }
+
+      // Chọn thư mục tiếp theo.
+      if (!state.current) {
+        const nextId = tree.selected.find(id =>
+          state.done.indexOf(id) < 0 && !coveredByAncestor_(id, tree, state.done));
+        if (!nextId) break;
+        state.current = { id: nextId, name: tree.name[nextId] };
+        state.pos = 0; state.n = 0; state.pageToken = null; state.curFound = 0;
+        queue.clear();
+        queue.getRange(1, 1, 1, QUEUE_HEADERS.length).setValues([QUEUE_HEADERS]);
+        appendRows_(queue, expandFolders_([[nextId, state.current.name]], tree.children, new Set()));
+        setFolderResult_(nextId, 'Đang quét...', new Date());
+        saveState_(state);
+        progress_(`Đang quét thư mục: ${state.current.name}`);
+      }
+
+      // Quét tiếp 1 nhóm thư mục con của thư mục hiện tại.
+      const totalFolders = queue.getLastRow() - 1;
+      if (!state.pageToken && state.pos >= totalFolders) {
+        setFolderResult_(state.current.id, `Xong: ${state.curFound} mục của người khác (${totalFolders} thư mục)`, new Date());
+        state.done.push(state.current.id);
+        state.current = null;
+        saveState_(state);
+        continue;
+      }
+      if (!state.pageToken) state.n = Math.min(PARENT_CHUNK, totalFolders - state.pos);
       const chunk = queue.getRange(state.pos + 2, 1, state.n, 2).getValues();
       const names = {};
       chunk.forEach(r => (names[r[0]] = r[1]));
@@ -250,9 +290,11 @@ function continueScan() {
         if (Date.now() - startedAt > CONFIG.TIME_LIMIT_MS) {
           saveState_(state);
           ScriptApp.newTrigger('continueScan').timeBased().after(60 * 1000).create();
-          const msg = `Đang quét: ${state.pos}/${totalFolders} thư mục, đã thấy ${state.found} mục. Sẽ tự chạy tiếp sau 1 phút.`;
+          const msg = `Đang quét "${state.current.name}": ${state.pos}/${totalFolders} thư mục con. ` +
+            `Đã xong ${state.done.length} thư mục chọn. Sẽ tự chạy tiếp sau 1 phút.`;
+          setFolderResult_(state.current.id, `Đang quét... ${state.pos}/${totalFolders} thư mục con, thấy ${state.curFound} mục`, new Date());
           log_('Quét', '', state.found, msg);
-          notify_(msg + ' Xem tiến độ ở tab Nhật ký.');
+          notify_(msg);
           return;
         }
         const res = Drive.Files.list({
@@ -271,19 +313,20 @@ function continueScan() {
             f.id, f.name, f.mimeType === FOLDER_MIME ? 'Thư mục' : 'File', f.webViewLink,
             o.displayName || '', o.emailAddress || '',
             (f.parents || []).map(p => names[p]).filter(Boolean).join(', '),
+            state.current.id,
           ]);
         });
         appendRows_(temp, rows);
         // Thư mục con của người khác (+ thư mục của bạn nằm trong đó) -> quét tiếp.
         appendRows_(queue, expandFolders_(subfolders, tree.children, new Set()));
         state.found += rows.length;
+        state.curFound += rows.length;
         state.pageToken = res.nextPageToken || null;
         saveState_(state);
       } while (state.pageToken);
 
       state.pos += state.n;
       saveState_(state);
-      progress_(`Bước 2/3: đã quét ${state.pos}/${queue.getLastRow() - 1} thư mục, thấy ${state.found} mục...`);
     }
   } finally {
     lock.releaseLock();
@@ -292,21 +335,21 @@ function continueScan() {
 }
 
 function finishScan_(state) {
-  progress_(`Bước 3/3: tìm thấy ${state.found} mục. Đang ghi vào tab Danh sách...`);
+  progress_('Đang ghi kết quả vào tab Danh sách...');
   const ss = getSpreadsheet_();
   const temp = ss.getSheetByName(SHEET_TEMP);
-  const queue = ss.getSheetByName(SHEET_QUEUE);
+  const doneSet = new Set(state.done);
   const found = temp.getLastRow() > 1
     ? temp.getRange(2, 1, temp.getLastRow() - 1, TEMP_HEADERS.length).getValues()
+      .filter(r => doneSet.has(r[TEMP_HEADERS.length - 1])) // bỏ kết quả của thư mục bị bỏ chọn giữa chừng
     : [];
-  const folderCount = queue.getLastRow() - 1;
 
   const result = upsertRows_(found);
 
   temp.clear();
-  queue.clear();
+  ss.getSheetByName(SHEET_QUEUE).clear();
   PropertiesService.getScriptProperties().deleteProperty(STATE_KEY);
-  const msg = `Quét xong: ${folderCount} thư mục, ${result.total} mục không thuộc sở hữu của bạn ` +
+  const msg = `Quét xong ${state.done.length} thư mục đã chọn: ${result.total} mục không thuộc sở hữu của bạn ` +
     `(mới: ${result.added}, đã xử lý: ${result.done})`;
   log_('Quét', '', result.total, msg);
   notify_(msg);

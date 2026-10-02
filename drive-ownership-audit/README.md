@@ -25,6 +25,8 @@ Script Google Apps Script, chạy bằng chính tài khoản của Giang:
 4. **Chạy thử trước khi gửi thật:** đặt `DRY_RUN: true` → chạy **3. Gửi email nhắc ngay** → xem tab `Nhật ký` xem sẽ gửi cho ai. Ổn thì đổi lại `DRY_RUN: false`.
 5. **Rà soát Drive → Bật chạy tự động hằng ngày**. Mỗi sáng ~7h script tự cập nhật cây thư mục (giữ nguyên ô đã tick), quét các thư mục đã chọn, rồi nhắc.
 
+Script quét **lần lượt từng thư mục đã tick** (theo thứ tự trong tab). Trước mỗi thư mục, và cả trong lúc đang quét, script đọc lại ô tick: bỏ tick thì thư mục đó bị bỏ qua (đang quét dở thì dừng, kết quả không tính), tick thêm thì được quét luôn trong lượt đó. Cột **Kết quả quét** cho biết từng thư mục: `Chờ quét` → `Đang quét...` → `Xong: N mục của người khác`.
+
 Muốn đổi phạm vi: chỉ cần tick/bỏ tick ở tab `Chọn thư mục`. File thuộc thư mục bị bỏ tick sẽ chuyển `Đã xử lý` ở lần quét sau và không bị nhắc nữa.
 
 ## Trạng thái trong sheet
