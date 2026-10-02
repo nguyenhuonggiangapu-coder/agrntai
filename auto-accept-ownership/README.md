@@ -13,9 +13,9 @@ Mỗi sáng (khoảng 6h–7h), script chạy trên máy chủ Google (không c�
 1. Vào https://script.google.com bằng **tài khoản nhận quyền** → *Dự án mới*.
 2. *Cài đặt dự án* (bánh răng) → tick **Hiển thị tệp kê khai "appsscript.json"**. Dán nội dung `appsscript.json` vào.
 3. Mở `Code.gs`, xoá code mẫu, dán nội dung `Code.gs`. Bấm **Lưu**.
-4. Chọn hàm `acceptPendingOwnerships` → **Chạy** → cấp quyền (Nâng cao → Đi tới… → Cho phép).
-5. Lần đầu đang để `DRY_RUN: true`: chỉ ghi nhật ký. Chạy `showLogLink` để lấy link sheet `Nhật ký nhận quyền`, xem danh sách file sẽ được nhận.
-6. Ổn thì sửa `DRY_RUN: false`, Lưu, chạy `installTrigger`. Xong.
+4. Chọn hàm `installTrigger` → **Chạy** → cấp quyền (Nâng cao → Đi tới… → Cho phép). Xong: script nhận ngay các file đang chờ và từ đó tự chạy mỗi sáng.
+
+Muốn chạy thử trước (chỉ ghi nhật ký, chưa nhận): sửa `DRY_RUN: true`, chạy `acceptPendingOwnerships`, xem sheet nhật ký bằng `showLogLink`.
 
 Tắt tự động: chạy `removeTrigger`. Muốn đổi giờ chạy: sửa `RUN_HOUR` rồi chạy lại `installTrigger`.
 

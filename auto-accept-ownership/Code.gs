@@ -11,7 +11,7 @@ const CONFIG = {
   // Chỉ nhận file từ những email/tên miền này. Để trống cả hai = nhận từ mọi người.
   ALLOWED_EMAILS: [],              // ví dụ: ['nhanvien1@gmail.com']
   ALLOWED_DOMAINS: [],             // ví dụ: ['mankai.edu.vn']
-  DRY_RUN: true,                   // true = chỉ ghi nhật ký, chưa nhận thật
+  DRY_RUN: false,                  // true = chỉ ghi nhật ký, chưa nhận thật (để thử)
   RUN_HOUR: 6,                     // chạy mỗi ngày 1 lần, khoảng 6h–7h sáng
   MAX_RUNTIME_MS: 4.5 * 60 * 1000, // mỗi lượt tối đa ~4,5 phút; chưa xong thì 1 phút sau tự chạy tiếp
   LOG_SHEET_NAME: 'Nhật ký nhận quyền',
