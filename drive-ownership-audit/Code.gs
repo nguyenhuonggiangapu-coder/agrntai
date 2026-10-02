@@ -47,8 +47,9 @@ const COL = HEADERS.reduce((m, h, i) => { m[h] = i; return m; }, {});
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Rà soát Drive')
-    .addItem('1. Quét Drive ngay', 'scanDrive')
-    .addItem('2. Gửi email nhắc ngay', 'sendReminders')
+    .addItem('1. Quét cấu trúc thư mục', 'scanFolders')
+    .addItem('2. Quét file trong thư mục đã chọn', 'scanDrive')
+    .addItem('3. Gửi email nhắc ngay', 'sendReminders')
     .addSeparator()
     .addItem('Bật chạy tự động hằng ngày', 'setupDailyTrigger')
     .addItem('Tắt chạy tự động', 'removeTriggers')
@@ -65,6 +66,104 @@ function removeTriggers() {
   ScriptApp.getProjectTriggers()
     .filter(t => t.getHandlerFunction() === 'runDaily')
     .forEach(t => ScriptApp.deleteTrigger(t));
+}
+
+/* ===================== BƯỚC 0: CHỌN THƯ MỤC =====================
+ * Quét cấu trúc thư mục bạn sở hữu ra tab "Chọn thư mục" (chỉ thư mục, rất nhanh).
+ * Bạn tick ô "Chọn" ở thư mục muốn rà soát; thư mục con tự động được tính theo.
+ */
+
+const SHEET_FOLDERS = 'Chọn thư mục';
+const FOLDER_HEADERS = ['Chọn', 'Thư mục', 'Đường dẫn', 'Link', 'Folder ID', 'Parent ID'];
+
+function scanFolders() {
+  scanFolders_();
+  getSpreadsheet_().getSheetByName(SHEET_FOLDERS).activate();
+  notify_('Đã cập nhật cấu trúc thư mục. Hãy tick ô "Chọn" ở thư mục muốn rà soát, rồi chạy bước 2.');
+}
+
+function scanFolders_() {
+  progress_('Đang đọc cấu trúc thư mục bạn sở hữu...');
+  const sheet = getSheet_(SHEET_FOLDERS, FOLDER_HEADERS);
+
+  // Giữ lại các ô đã tick từ lần trước.
+  const checked = new Set();
+  if (sheet.getLastRow() > 1) {
+    sheet.getRange(2, 1, sheet.getLastRow() - 1, 5).getValues()
+      .forEach(r => { if (r[0] === true) checked.add(r[4]); });
+  }
+
+  const info = {};
+  let pageToken;
+  do {
+    const res = Drive.Files.list({
+      q: "'me' in owners and mimeType = '" + FOLDER_MIME + "' and trashed = false",
+      pageSize: 1000,
+      pageToken: pageToken,
+      fields: 'nextPageToken, files(id,name,parents)',
+    });
+    (res.files || []).forEach(f => (info[f.id] = { name: f.name, parent: (f.parents || [])[0] || '' }));
+    pageToken = res.nextPageToken;
+  } while (pageToken);
+
+  const pathOf = {};
+  const getPath = id => {
+    if (pathOf[id]) return pathOf[id];
+    const f = info[id];
+    const seen = [];
+    let cur = f.parent;
+    const chain = [f.name];
+    while (cur && info[cur] && seen.length < 50) { chain.unshift(info[cur].name); seen.push(cur); cur = info[cur].parent; }
+    return (pathOf[id] = chain);
+  };
+
+  const rows = Object.keys(info).map(id => {
+    const path = getPath(id);
+    return [
+      checked.has(id), '　'.repeat(path.length - 1) + info[id].name, path.join(' / '),
+      'https://drive.google.com/drive/folders/' + id, id, info[id].parent,
+    ];
+  });
+  rows.sort((a, b) => a[2].localeCompare(b[2], 'vi'));
+
+  sheet.clear();
+  sheet.getRange(1, 1, 1, FOLDER_HEADERS.length).setValues([FOLDER_HEADERS]).setFontWeight('bold');
+  sheet.setFrozenRows(1);
+  if (rows.length) {
+    sheet.getRange(2, 1, rows.length, FOLDER_HEADERS.length).setValues(rows);
+    sheet.getRange(2, 1, rows.length, 1).insertCheckboxes();
+  }
+  sheet.hideColumns(5, 2);
+  return rows.length;
+}
+
+/** Cây thư mục bạn sở hữu: parentId -> [[id, name], ...], và danh sách thư mục đã tick. */
+function loadFolderTree_() {
+  const sheet = getSpreadsheet_().getSheetByName(SHEET_FOLDERS);
+  const children = {};
+  const selected = [];
+  if (sheet && sheet.getLastRow() > 1) {
+    sheet.getRange(2, 1, sheet.getLastRow() - 1, FOLDER_HEADERS.length).getValues().forEach(r => {
+      const id = r[4], parent = r[5], name = String(r[1]).replace(/^\u3000+/, '');
+      (children[parent] = children[parent] || []).push([id, name]);
+      if (r[0] === true) selected.push([id, name]);
+    });
+  }
+  return { children: children, selected: selected };
+}
+
+/** Thêm toàn bộ thư mục con (bạn sở hữu) của các thư mục đầu vào. */
+function expandFolders_(start, children, seen) {
+  const out = [];
+  const stack = start.slice();
+  while (stack.length) {
+    const [id, name] = stack.pop();
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push([id, name]);
+    (children[id] || []).forEach(c => stack.push(c));
+  }
+  return out;
 }
 
 /* ===================== BƯỚC 1 + 2: QUÉT (tự chia nhiều lượt) =====================
@@ -85,40 +184,38 @@ const ITEM_FIELDS = 'id,name,mimeType,parents,webViewLink,owners(displayName,ema
 
 function scanDrive() { startScan_(false); }
 
-/** Việc chạy hằng ngày: quét, quét xong thì tự gửi nhắc. */
-function runDaily() { startScan_(true); }
+/** Việc chạy hằng ngày: cập nhật cây thư mục, quét thư mục đã chọn, xong thì tự gửi nhắc. */
+function runDaily() {
+  scanFolders_(); // cập nhật thư mục con mới tạo, giữ nguyên các ô đã tick
+  startScan_(true);
+}
 
 function startScan_(remindAfter) {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(1000)) return notify_('Đang có một lượt quét chạy, vui lòng đợi.');
+  let started = false;
   try {
     clearContinueTriggers_();
     getSheet_(CONFIG.SHEET_FILES, HEADERS);
     const queue = resetSheet_(SHEET_QUEUE, QUEUE_HEADERS);
     resetSheet_(SHEET_TEMP, TEMP_HEADERS);
-    progress_('Bước 1/3: đang đọc các thư mục bạn sở hữu...');
-
-    let pageToken;
-    let total = 0;
-    do {
-      const res = Drive.Files.list({
-        q: "'me' in owners and mimeType = '" + FOLDER_MIME + "' and trashed = false",
-        pageSize: 1000,
-        pageToken: pageToken,
-        fields: 'nextPageToken, files(id,name)',
-      });
-      const files = res.files || [];
-      appendRows_(queue, files.map(f => [f.id, f.name]));
-      total += files.length;
-      pageToken = res.nextPageToken;
-    } while (pageToken);
+    const tree = loadFolderTree_();
+    if (!tree.selected.length) {
+      notify_('Chưa chọn thư mục nào. Chạy "1. Quét cấu trúc thư mục" rồi tick ô "Chọn" ở tab ' + SHEET_FOLDERS + '.');
+      return;
+    }
+    const folders = expandFolders_(tree.selected, tree.children, new Set());
+    appendRows_(queue, folders);
+    const total = folders.length;
+    progress_(`Bước 1/3: ${tree.selected.length} thư mục đã chọn, tổng ${total} thư mục kể cả thư mục con.`);
 
     saveState_({ pos: 0, n: 0, pageToken: null, found: 0, remindAfter: remindAfter, runs: 0 });
-    log_('Quét', '', 0, `Bắt đầu quét: ${total} thư mục bạn sở hữu`);
+    log_('Quét', '', 0, `Bắt đầu quét: ${tree.selected.length} thư mục đã chọn (${total} kể cả thư mục con)`);
+    started = true;
   } finally {
     lock.releaseLock();
   }
-  continueScan();
+  if (started) continueScan();
 }
 
 /** Chạy tiếp lượt quét đang dở. Được gọi tự động, không cần bấm. */
@@ -135,6 +232,7 @@ function continueScan() {
     const ss = getSpreadsheet_();
     const queue = ss.getSheetByName(SHEET_QUEUE);
     const temp = ss.getSheetByName(SHEET_TEMP);
+    const tree = loadFolderTree_();
 
     while (true) {
       const totalFolders = queue.getLastRow() - 1;
@@ -176,7 +274,8 @@ function continueScan() {
           ]);
         });
         appendRows_(temp, rows);
-        appendRows_(queue, subfolders); // thư mục con của người khác -> quét tiếp
+        // Thư mục con của người khác (+ thư mục của bạn nằm trong đó) -> quét tiếp.
+        appendRows_(queue, expandFolders_(subfolders, tree.children, new Set()));
         state.found += rows.length;
         state.pageToken = res.nextPageToken || null;
         saveState_(state);

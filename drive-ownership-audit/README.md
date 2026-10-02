@@ -19,15 +19,18 @@ Script Google Apps Script, chạy bằng chính tài khoản của Giang:
 
 ## Chạy
 
-1. **Rà soát Drive → 1. Quét Drive ngay**. Lần đầu Google sẽ hỏi cấp quyền → chọn tài khoản → *Nâng cao* → *Đi tới (không an toàn)* → *Cho phép* (đây là script của chính bạn nên Google cảnh báo như vậy là bình thường).
-2. Xem sheet `Danh sách`. Nếu không muốn nhắc file nào, đổi cột **Trạng thái** thành `Bỏ qua`.
-3. **Chạy thử trước khi gửi thật:** đặt `DRY_RUN: true` → chạy **2. Gửi email nhắc ngay** → xem sheet `Nhật ký` xem sẽ gửi cho ai. Ổn thì đổi lại `DRY_RUN: false`.
-4. **Rà soát Drive → Bật chạy tự động hằng ngày**. Từ đó, mỗi sáng ~7h script tự quét + nhắc.
+1. **Rà soát Drive → 1. Quét cấu trúc thư mục**. Script chỉ đọc danh sách thư mục bạn sở hữu (rất nhanh) và ghi ra tab `Chọn thư mục`, có thụt lề theo cấp và cột đường dẫn. Lần đầu Google sẽ hỏi cấp quyền → chọn tài khoản → *Nâng cao* → *Đi tới (không an toàn)* → *Cho phép*.
+2. Ở tab `Chọn thư mục`, **tick ô "Chọn"** ở thư mục muốn rà soát. Tick thư mục cha là đủ, thư mục con tự được tính theo.
+3. **Rà soát Drive → 2. Quét file trong thư mục đã chọn**. Kết quả ra tab `Danh sách`. Nếu không muốn nhắc file nào, đổi cột **Trạng thái** thành `Bỏ qua`.
+4. **Chạy thử trước khi gửi thật:** đặt `DRY_RUN: true` → chạy **3. Gửi email nhắc ngay** → xem tab `Nhật ký` xem sẽ gửi cho ai. Ổn thì đổi lại `DRY_RUN: false`.
+5. **Rà soát Drive → Bật chạy tự động hằng ngày**. Mỗi sáng ~7h script tự cập nhật cây thư mục (giữ nguyên ô đã tick), quét các thư mục đã chọn, rồi nhắc.
+
+Muốn đổi phạm vi: chỉ cần tick/bỏ tick ở tab `Chọn thư mục`. File thuộc thư mục bị bỏ tick sẽ chuyển `Đã xử lý` ở lần quét sau và không bị nhắc nữa.
 
 ## Trạng thái trong sheet
 
 - `Chưa chuyển`: đang chờ chủ file chuyển quyền, sẽ được nhắc.
-- `Đã xử lý`: lần quét sau không còn thấy (đã chuyển quyền cho Giang, bị xoá, hoặc bị chuyển ra ngoài).
+- `Đã xử lý`: lần quét sau không còn thấy (đã chuyển quyền cho Giang, bị xoá, bị chuyển ra ngoài, hoặc thư mục chứa nó đã bị bỏ tick).
 - `Bỏ qua`: Giang tự đặt; script không nhắc nữa.
 
 ## Lưu ý quan trọng
