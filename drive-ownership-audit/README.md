@@ -21,8 +21,8 @@ Script Google Apps Script, chạy bằng chính tài khoản của Giang:
 
 1. **Rà soát Drive → 1. Quét cấu trúc thư mục**. Script chỉ đọc danh sách thư mục bạn sở hữu (rất nhanh) và ghi ra tab `Chọn thư mục` dạng **cây từ to đến bé**: 📁 là thư mục cấp 1, `└` là thư mục con; bấm dấu **+ / −** bên trái số dòng để mở/thu gọn. Nhóm `DRIVE CỦA TÔI` là thư mục nằm trong Drive của bạn; nhóm `NẰM TRONG THƯ MỤC NGƯỜI KHÁC` là thư mục bạn tạo bên trong thư mục người khác chia sẻ. Lần đầu Google sẽ hỏi cấp quyền → chọn tài khoản → *Nâng cao* → *Đi tới (không an toàn)* → *Cho phép*.
 2. Ở tab `Chọn thư mục`, **tick ô "Chọn"** ở thư mục muốn rà soát. Tick thư mục mẹ thì **toàn bộ thư mục con tự được tick** (bỏ tick cũng vậy). Muốn loại riêng một thư mục con thì bỏ tick nó: chỉ thư mục đang được tick mới được quét.
-3. **Rà soát Drive → 2. Quét file trong thư mục đã chọn**. Kết quả ra tab `Danh sách`. Nếu không muốn nhắc file nào, đổi cột **Trạng thái** thành `Bỏ qua`.
-4. **Chạy thử trước khi gửi thật:** đặt `DRY_RUN: true` → chạy **3. Gửi email nhắc ngay** → xem tab `Nhật ký` xem sẽ gửi cho ai. Ổn thì đổi lại `DRY_RUN: false`.
+3. **Rà soát Drive → 2. Quét file trong thư mục đã chọn**. Kết quả ra tab `Danh sách`, cũng **dạng cây gom theo thư mục** (📁 thư mục, 📄 file, có nút + / −, mở ra là lớp 1). Cột **Nhắc** là ô tick: file đang tick sẽ được gửi email nhắc, bỏ tick là không nhắc. Tick/bỏ tick thư mục mẹ thì mọi thư mục con và file bên trong đổi theo. Các ô tick được giữ nguyên qua các lần quét sau; file mới phát hiện mặc định được tick.
+4. **Chạy thử trước khi gửi thật:** đặt `DRY_RUN: true` → chạy **3. Gửi email nhắc ngay (các file đang tick)** → xem tab `Nhật ký` xem sẽ gửi cho ai. Ổn thì đổi lại `DRY_RUN: false`.
 5. **Rà soát Drive → Bật chạy tự động hằng ngày**. Mỗi sáng ~7h script tự cập nhật cây thư mục (giữ nguyên ô đã tick), quét các thư mục đã chọn, rồi nhắc.
 
 Script quét **lần lượt từng thư mục đã tick** (theo thứ tự trong tab). Trước mỗi thư mục, và cả trong lúc đang quét, script đọc lại ô tick: bỏ tick thì thư mục đó bị bỏ qua (đang quét dở thì dừng, kết quả không tính), tick thêm thì được quét luôn trong lượt đó. Cột **Kết quả quét** cho biết từng thư mục: `Chờ quét` → `Đang quét...` → `Xong: N mục của người khác`.
@@ -33,7 +33,7 @@ Muốn đổi phạm vi: chỉ cần tick/bỏ tick ở tab `Chọn thư mục`.
 
 - `Chưa chuyển`: đang chờ chủ file chuyển quyền, sẽ được nhắc.
 - `Đã xử lý`: lần quét sau không còn thấy (đã chuyển quyền cho Giang, bị xoá, bị chuyển ra ngoài, hoặc thư mục chứa nó đã bị bỏ tick).
-- `Bỏ qua`: Giang tự đặt; script không nhắc nữa.
+- Muốn không nhắc file nào: bỏ tick ô **Nhắc** ở tab `Danh sách` (bản cũ dùng trạng thái `Bỏ qua`, vẫn được tôn trọng).
 
 ## Lưu ý quan trọng
 
@@ -44,4 +44,4 @@ Muốn đổi phạm vi: chỉ cần tick/bỏ tick ở tab `Chọn thư mục`.
 
 ## Drive lớn
 
-Script tự chia nhiều lượt: mỗi lượt chạy khoảng 4 phút, ghi kết quả vào tab ẩn, rồi hẹn 1 phút sau tự chạy tiếp cho tới khi xong. Theo dõi tiến độ ở tab `Nhật ký` (dòng "Đang quét: x/y thư mục..."). Khi thấy dòng **"Quét xong"** thì tab `Danh sách` đã có đủ dữ liệu. Hai tab `_Hàng đợi` và `_Kết quả quét` là tab ẩn dùng tạm, không cần đụng vào.
+Script tự chia nhiều lượt: mỗi lượt chạy khoảng 4 phút, ghi kết quả vào tab ẩn, rồi hẹn 1 phút sau tự chạy tiếp cho tới khi xong. Theo dõi tiến độ ở tab `Nhật ký` (dòng "Đang quét: x/y thư mục..."). Khi thấy dòng **"Quét xong"** thì tab `Danh sách` đã có đủ dữ liệu. Các tab ẩn `_Dữ liệu` (dữ liệu gốc: ngày phát hiện, số lần nhắc...), `_Hàng đợi`, `_Kết quả quét` do script tự quản lý, không cần đụng vào. Tab `Danh sách` được vẽ lại sau mỗi lần quét/nhắc, nên đừng ghi chú tay vào đó.

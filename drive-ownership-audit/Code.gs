@@ -13,7 +13,7 @@
 const CONFIG = {
   // Để trống nếu script được tạo từ trong Google Sheet (Tiện ích mở rộng > Apps Script).
   SPREADSHEET_ID: '',
-  SHEET_FILES: 'Danh sách',
+  SHEET_FILES: 'Danh sách',  // tab xem dạng cây (vẽ lại sau mỗi lần quét/nhắc)
   SHEET_LOG: 'Nhật ký',
 
   REMIND_INTERVAL_DAYS: 7, // khoảng cách tối thiểu giữa 2 lần nhắc cùng một người
@@ -28,17 +28,18 @@ const CONFIG = {
 };
 
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
+const SHEET_DATA = '_Dữ liệu'; // dữ liệu gốc, tab ẩn
 
 const STATUS = {
   PENDING: 'Chưa chuyển',
   DONE: 'Đã xử lý',  // đã chuyển quyền, bị xoá hoặc bị chuyển ra khỏi thư mục
-  SKIP: 'Bỏ qua',    // tự đặt tay nếu không muốn nhắc file này nữa
+  SKIP: 'Bỏ qua',    // bản cũ; nay dùng ô tick "Nhắc" ở tab Danh sách
 };
 
 const HEADERS = [
   'File ID', 'Tên file', 'Loại', 'Link', 'Chủ sở hữu', 'Email chủ sở hữu',
   'Thư mục chứa', 'Phát hiện lần đầu', 'Quét gần nhất', 'Trạng thái',
-  'Nhắc gần nhất', 'Số lần nhắc',
+  'Nhắc gần nhất', 'Số lần nhắc', 'Đường dẫn thư mục', 'Nhắc',
 ];
 const COL = HEADERS.reduce((m, h, i) => { m[h] = i; return m; }, {});
 
@@ -48,9 +49,9 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Rà soát Drive')
     .addItem('1. Quét cấu trúc thư mục', 'scanFolders')
-    .addItem('   Thu gọn cây thư mục', 'collapseFolders')
     .addItem('2. Quét file trong thư mục đã chọn', 'scanDrive')
-    .addItem('3. Gửi email nhắc ngay', 'sendReminders')
+    .addItem('3. Gửi email nhắc ngay (các file đang tick)', 'sendReminders')
+    .addItem('Thu gọn cây ở tab đang mở', 'collapseTrees')
     .addSeparator()
     .addItem('Bật chạy tự động hằng ngày', 'setupDailyTrigger')
     .addItem('Tắt chạy tự động', 'removeTriggers')
@@ -205,26 +206,7 @@ function scanFolders_() {
   if (level1.length) sheet.getRangeList(level1.map(i => 'B' + (i + 2))).setFontWeight('bold');
 
   // Nút +/- : thư mục con được nhóm dưới thư mục mẹ.
-  const levels = rows.map(r => r[FC['Cấp']]);
-  const maxDepth = Math.min(8, Math.max.apply(null, levels));
-  let calls = 0;
-  const groups = [];
-  for (let k = 1; k < maxDepth && calls < MAX_GROUP_CALLS; k++) {
-    let start = -1;
-    for (let i = 0; i <= levels.length; i++) {
-      if (i < levels.length && levels[i] > k) { if (start < 0) start = i; continue; }
-      if (start >= 0) {
-        sheet.getRange(start + 2, 1, i - start, 1).shiftRowGroupDepth(1);
-        groups.push([start + 2, k]);
-        calls++;
-        start = -1;
-      }
-    }
-  }
-  if (calls) {
-    sheet.setRowGroupControlPosition(SpreadsheetApp.GroupControlTogglePosition.BEFORE);
-    collapseTree_(sheet, groups);
-  }
+  applyTreeGroups_(sheet, rows.map(r => r[FC['Cấp']]));
   return rows.length - headerRows.length - parentRows.length;
 }
 
@@ -244,23 +226,15 @@ function collapseTree_(sheet, groups) {
   SpreadsheetApp.flush();
 }
 
-/** Menu: thu gọn lại cây thư mục bất cứ lúc nào. */
-function collapseFolders() {
-  const sheet = getSpreadsheet_().getSheetByName(SHEET_FOLDERS);
-  if (!sheet) return notify_('Chưa có tab ' + SHEET_FOLDERS + '. Hãy chạy "1. Quét cấu trúc thư mục".');
-  SpreadsheetApp.flush();
-  sheet.collapseAllRowGroups();
-  sheet.activate();
-}
-
-/** Tick/bỏ tick thư mục mẹ -> áp dụng cho toàn bộ thư mục con bên dưới. Tự chạy khi sửa ô. */
+/** Tick/bỏ tick thư mục mẹ -> áp dụng cho mọi dòng con bên dưới (cả 2 tab cây). Tự chạy khi sửa ô. */
 function onEdit(e) {
   const sheet = e.range.getSheet();
-  if (sheet.getName() !== SHEET_FOLDERS || e.range.getColumn() !== 1 || e.range.getRow() < 2) return;
+  const levelCol = { [SHEET_FOLDERS]: FC['Cấp'], [CONFIG.SHEET_FILES]: LC['Cấp'] }[sheet.getName()];
+  if (levelCol === undefined || e.range.getColumn() !== 1 || e.range.getRow() < 2) return;
   const last = sheet.getLastRow();
   if (last < 2) return;
   const checks = sheet.getRange(2, 1, last - 1, 1).getValues();
-  const levels = sheet.getRange(2, FC['Cấp'] + 1, last - 1, 1).getValues().map(r => Number(r[0]) || 0);
+  const levels = sheet.getRange(2, levelCol + 1, last - 1, 1).getValues().map(r => Number(r[0]) || 0);
   const first = e.range.getRow() - 2;
   const end = Math.min(first + e.range.getNumRows(), levels.length);
   let changed = false;
@@ -277,13 +251,14 @@ function onEdit(e) {
 /** Đọc tab "Chọn thư mục" (luôn đọc mới -> phản ánh ô tick tại thời điểm gọi). */
 function loadFolderTree_() {
   const sheet = getSpreadsheet_().getSheetByName(SHEET_FOLDERS);
-  const tree = { children: {}, parent: {}, name: {}, selected: [], isSelected: new Set() };
+  const tree = { children: {}, parent: {}, name: {}, path: {}, selected: [], isSelected: new Set() };
   if (!sheet || sheet.getLastRow() < 2) return tree;
   sheet.getRange(2, 1, sheet.getLastRow() - 1, FOLDER_HEADERS.length).getValues().forEach(r => {
     const id = r[FC['Folder ID']], parent = r[FC['Parent ID']];
     if (!id) return; // dòng tiêu đề nhóm
     const name = r[FC['Tên']] || String(r[FC['Thư mục']]);
     tree.name[id] = name;
+    tree.path[id] = r[FC['Đường dẫn']] || name;
     tree.parent[id] = parent;
     (tree.children[parent] = tree.children[parent] || []).push(id);
     if (r[0] === true) { tree.selected.push(id); tree.isSelected.add(id); }
@@ -302,7 +277,7 @@ function expandSelected_(rootId, tree) {
   const stack = [rootId];
   while (stack.length) {
     const id = stack.pop();
-    out.push([id, tree.name[id]]);
+    out.push([id, tree.name[id], tree.path[id]]);
     (tree.children[id] || []).forEach(c => { if (tree.isSelected.has(c)) stack.push(c); });
   }
   return out;
@@ -327,18 +302,180 @@ function setFolderResult_(id, text, at) {
   setFolderResults_({ [id]: text }, at);
 }
 
+/* ===================== TAB "DANH SÁCH" DẠNG CÂY =====================
+ * Dữ liệu gốc nằm ở tab ẩn "_Dữ liệu". Tab "Danh sách" được vẽ lại sau mỗi lần quét/nhắc:
+ * gom theo thư mục, có nút +/-, ô "Nhắc" để chọn file sẽ được gửi email nhắc.
+ * Tick thư mục mẹ -> tự tick mọi thư mục/file bên trong (onEdit).
+ */
+
+const LIST_HEADERS = ['Nhắc', 'Tên', 'Chủ sở hữu', 'Email chủ sở hữu', 'Link', 'Trạng thái',
+  'Nhắc gần nhất', 'Số lần nhắc', 'Đường dẫn', 'File ID', 'Cấp'];
+const LC = LIST_HEADERS.reduce((m, h, i) => { m[h] = i; return m; }, {});
+
+/** Đọc ô tick ở tab "Danh sách" -> ghi vào cột "Nhắc" của dữ liệu gốc. */
+function syncListChecks_() {
+  const view = getSpreadsheet_().getSheetByName(CONFIG.SHEET_FILES);
+  if (!view || view.getLastRow() < 2) return;
+  const h = view.getRange(1, 1, 1, view.getLastColumn()).getValues()[0];
+  const iId = h.indexOf('File ID');
+  if (h[0] !== 'Nhắc' || iId < 0) return; // không phải tab dạng cây
+  const checks = {};
+  view.getRange(2, 1, view.getLastRow() - 1, iId + 1).getValues().forEach(r => {
+    if (r[iId] && typeof r[0] === 'boolean') checks[r[iId]] = r[0];
+  });
+  const data = getDataSheet_();
+  if (data.getLastRow() < 2) return;
+  const n = data.getLastRow() - 1;
+  const ids = data.getRange(2, COL['File ID'] + 1, n, 1).getValues();
+  const col = data.getRange(2, COL['Nhắc'] + 1, n, 1);
+  const vals = col.getValues();
+  let changed = false;
+  ids.forEach((r, i) => {
+    if (r[0] in checks && vals[i][0] !== checks[r[0]]) { vals[i][0] = checks[r[0]]; changed = true; }
+  });
+  if (changed) col.setValues(vals);
+}
+
+/** Vẽ lại tab "Danh sách" từ dữ liệu gốc (chỉ các mục chưa xử lý). */
+function renderList_() {
+  const ss = getSpreadsheet_();
+  const data = getDataSheet_();
+  const items = data.getLastRow() > 1
+    ? data.getRange(2, 1, data.getLastRow() - 1, HEADERS.length).getValues()
+      .filter(r => r[COL['Trạng thái']] && r[COL['Trạng thái']] !== STATUS.DONE)
+    : [];
+
+  // Dựng cây theo đường dẫn thư mục.
+  const newNode = name => ({ name: name, kids: {}, files: [], item: null });
+  const root = newNode('');
+  const nodeAt = segs => segs.reduce((n, s) => (n.kids[s] = n.kids[s] || newNode(s)), root);
+  items.forEach(r => {
+    const path = String(r[COL['Đường dẫn thư mục']] || r[COL['Thư mục chứa']] || '(Không rõ thư mục)');
+    const segs = path.split(' / ');
+    if (r[COL['Loại']] === 'Thư mục') nodeAt(segs.concat(String(r[COL['Tên file']]))).item = r;
+    else nodeAt(segs).files.push(r);
+  });
+  const ticked = wantsReminder_;
+  const stats = n => {
+    if (n.stats) return n.stats;
+    let files = n.files.length, all = n.files.every(ticked) && (!n.item || ticked(n.item));
+    Object.keys(n.kids).forEach(k => { const s = stats(n.kids[k]); files += s.files; all = all && s.all; });
+    return (n.stats = { files: files, all: all });
+  };
+
+  const rows = [];
+  const byName = (a, b) => String(a).localeCompare(String(b), 'vi');
+  const itemCols = r => [r[COL['Chủ sở hữu']], r[COL['Email chủ sở hữu']], r[COL['Link']],
+    r[COL['Trạng thái']], r[COL['Nhắc gần nhất']], r[COL['Số lần nhắc']]];
+  const indent = d => (d === 1 ? '' : '　　'.repeat(d - 2) + '└ ');
+  const walk = (n, depth, path) => {
+    const p = path.concat(n.name);
+    const s = stats(n);
+    const label = indent(depth) + '📁 ' + n.name + (s.files ? `  (${s.files} file)` : '');
+    const it = n.item;
+    rows.push([it ? ticked(it) : s.all, label].concat(it ? itemCols(it) : ['', '', '', '', '', ''],
+      [p.join(' / '), it ? it[COL['File ID']] : '', depth]));
+    Object.keys(n.kids).sort(byName).forEach(k => walk(n.kids[k], depth + 1, p));
+    n.files.slice().sort((a, b) => byName(a[COL['Tên file']], b[COL['Tên file']])).forEach(f => {
+      rows.push([ticked(f), indent(depth + 1) + '📄 ' + f[COL['Tên file']]].concat(itemCols(f),
+        [p.join(' / '), f[COL['File ID']], depth + 1]));
+    });
+  };
+  Object.keys(root.kids).sort(byName).forEach(k => walk(root.kids[k], 1, []));
+
+  let sheet = ss.getSheetByName(CONFIG.SHEET_FILES);
+  const index = sheet ? sheet.getIndex() : ss.getNumSheets() + 1;
+  if (sheet) ss.deleteSheet(sheet);
+  sheet = ss.insertSheet(CONFIG.SHEET_FILES, index - 1);
+  sheet.getRange(1, 1, 1, LIST_HEADERS.length).setValues([LIST_HEADERS]).setFontWeight('bold');
+  sheet.setFrozenRows(1);
+  sheet.hideColumns(LC['File ID'] + 1, 2);
+  sheet.setColumnWidth(LC['Tên'] + 1, 420);
+  if (!rows.length) {
+    sheet.getRange(2, 2).setValue('Không có file nào của người khác trong các thư mục đã chọn.');
+    return;
+  }
+  sheet.getRange(2, 1, rows.length, LIST_HEADERS.length).setValues(rows);
+  sheet.getRange(2, 1, rows.length, 1).insertCheckboxes();
+  const folderRows = rows.map((r, i) => (String(r[LC['Tên']]).indexOf('📁') >= 0 ? i : -1)).filter(i => i >= 0);
+  if (folderRows.length) sheet.getRangeList(folderRows.map(i => 'B' + (i + 2))).setFontWeight('bold');
+  applyTreeGroups_(sheet, rows.map(r => r[LC['Cấp']]));
+}
+
+/** Tạo nút +/- theo cột cấp (thư mục con nhóm dưới thư mục mẹ) rồi thu gọn về lớp 1. */
+function applyTreeGroups_(sheet, levels) {
+  const maxDepth = Math.min(8, Math.max.apply(null, levels));
+  let calls = 0;
+  const groups = [];
+  for (let k = 1; k < maxDepth && calls < MAX_GROUP_CALLS; k++) {
+    let start = -1;
+    for (let i = 0; i <= levels.length; i++) {
+      if (i < levels.length && levels[i] > k) { if (start < 0) start = i; continue; }
+      if (start >= 0) {
+        sheet.getRange(start + 2, 1, i - start, 1).shiftRowGroupDepth(1);
+        groups.push([start + 2, k]);
+        calls++;
+        start = -1;
+      }
+    }
+  }
+  if (calls) {
+    sheet.setRowGroupControlPosition(SpreadsheetApp.GroupControlTogglePosition.BEFORE);
+    collapseTree_(sheet, groups);
+  }
+}
+
+/** File có được chọn để nhắc không (ô "Nhắc"; bản cũ dùng trạng thái "Bỏ qua"). */
+function wantsReminder_(r) {
+  const v = r[COL['Nhắc']];
+  return v === '' || v === undefined ? r[COL['Trạng thái']] !== STATUS.SKIP : v !== false;
+}
+
+/** Dữ liệu gốc (tab ẩn). Tự chuyển tab "Danh sách" kiểu cũ (bảng phẳng) sang đây. */
+function getDataSheet_() {
+  const ss = getSpreadsheet_();
+  let sheet = ss.getSheetByName(SHEET_DATA);
+  if (!sheet) {
+    const old = ss.getSheetByName(CONFIG.SHEET_FILES);
+    if (old && old.getLastRow() >= 1 && old.getRange(1, 1).getValue() === 'File ID') {
+      old.setName(SHEET_DATA);
+      sheet = old;
+    } else {
+      sheet = ss.insertSheet(SHEET_DATA);
+    }
+    sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+    sheet.hideSheet();
+  }
+  return sheet;
+}
+
+/** Menu: thu gọn cây ở tab đang mở (Chọn thư mục hoặc Danh sách). */
+function collapseTrees() {
+  const ss = getSpreadsheet_();
+  const active = ss.getActiveSheet();
+  const name = active && [SHEET_FOLDERS, CONFIG.SHEET_FILES].indexOf(active.getName()) >= 0
+    ? active.getName() : SHEET_FOLDERS;
+  const sheet = ss.getSheetByName(name);
+  if (!sheet) return notify_('Chưa có tab ' + name + '.');
+  SpreadsheetApp.flush();
+  sheet.collapseAllRowGroups();
+  sheet.activate();
+}
+
 /* ===================== BƯỚC 2: QUÉT FILE (lần lượt từng thư mục đã chọn) =====================
  * - Quét từng thư mục đã tick (thư mục mẹ cùng các thư mục con đang tick), theo thứ tự trong tab.
  * - Trước mỗi thư mục (và giữa chừng) đọc lại ô tick: bỏ tick -> bỏ qua/dừng; tick thêm -> quét luôn.
  * - Hàng đợi thư mục con nằm ở tab ẩn "_Hàng đợi"; file tìm được ghi ngay vào tab ẩn "_Kết quả quét".
  * - Gần hết giờ thì lưu vị trí, hẹn 1 phút sau tự chạy tiếp (continueScan).
- * - Quét xong thì gộp kết quả vào tab "Danh sách".
+ * - Quét xong thì gộp kết quả vào dữ liệu gốc (tab ẩn) và vẽ lại tab "Danh sách" dạng cây.
  */
 
 const SHEET_QUEUE = '_Hàng đợi';
 const SHEET_TEMP = '_Kết quả quét';
-const QUEUE_HEADERS = ['Folder ID', 'Tên thư mục'];
-const TEMP_HEADERS = ['File ID', 'Tên file', 'Loại', 'Link', 'Chủ sở hữu', 'Email chủ sở hữu', 'Thư mục chứa', 'Thư mục gốc ID'];
+const QUEUE_HEADERS = ['Folder ID', 'Tên thư mục', 'Đường dẫn'];
+const TEMP_HEADERS = ['File ID', 'Tên file', 'Loại', 'Link', 'Chủ sở hữu', 'Email chủ sở hữu', 'Thư mục chứa',
+  'Đường dẫn thư mục', 'Thư mục gốc ID'];
 const STATE_KEY = 'SCAN_STATE';
 const PARENT_CHUNK = 40; // số thư mục gộp trong 1 lần hỏi Drive
 const ITEM_FIELDS = 'id,name,mimeType,parents,webViewLink,owners(displayName,emailAddress)';
@@ -362,7 +499,7 @@ function startScan_(remindAfter) {
       notify_('Chưa chọn thư mục nào. Chạy "1. Quét cấu trúc thư mục" rồi tick ô "Chọn" ở tab ' + SHEET_FOLDERS + '.');
       return;
     }
-    getSheet_(CONFIG.SHEET_FILES, HEADERS);
+    getDataSheet_();
     resetSheet_(SHEET_QUEUE, QUEUE_HEADERS);
     resetSheet_(SHEET_TEMP, TEMP_HEADERS);
     const status = {};
@@ -426,9 +563,10 @@ function continueScan() {
         continue;
       }
       if (!state.pageToken) state.n = Math.min(PARENT_CHUNK, totalFolders - state.pos);
-      const chunk = queue.getRange(state.pos + 2, 1, state.n, 2).getValues();
+      const chunk = queue.getRange(state.pos + 2, 1, state.n, 3).getValues();
       const names = {};
-      chunk.forEach(r => (names[r[0]] = r[1]));
+      const paths = {};
+      chunk.forEach(r => { names[r[0]] = r[1]; paths[r[0]] = r[2] || r[1]; });
       const q = "not 'me' in owners and trashed = false and (" +
         chunk.map(r => `'${r[0]}' in parents`).join(' or ') + ')';
 
@@ -452,13 +590,15 @@ function continueScan() {
         const rows = [];
         const subfolders = [];
         (res.files || []).forEach(f => {
-          if (f.mimeType === FOLDER_MIME) subfolders.push([f.id, f.name]);
+          const parent = (f.parents || []).find(p => p in paths);
+          if (f.mimeType === FOLDER_MIME) subfolders.push([f.id, f.name, paths[parent] + ' / ' + f.name]);
           if (!f.owners || !f.owners.length) return;
           const o = f.owners[0];
           rows.push([
             f.id, f.name, f.mimeType === FOLDER_MIME ? 'Thư mục' : 'File', f.webViewLink,
             o.displayName || '', o.emailAddress || '',
             (f.parents || []).map(p => names[p]).filter(Boolean).join(', '),
+            paths[parent] || '',
             state.current.id,
           ]);
         });
@@ -490,7 +630,9 @@ function finishScan_(state) {
       .filter(r => doneSet.has(r[TEMP_HEADERS.length - 1])) // bỏ kết quả của thư mục bị bỏ chọn giữa chừng
     : [];
 
+  syncListChecks_(); // giữ các ô tick ở tab Danh sách trước khi cập nhật
   const result = upsertRows_(found);
+  renderList_();
 
   temp.clear();
   ss.getSheetByName(SHEET_QUEUE).clear();
@@ -505,7 +647,7 @@ function finishScan_(state) {
 
 /** found: các dòng theo TEMP_HEADERS. Gộp vào tab Danh sách. */
 function upsertRows_(found) {
-  const sheet = getSheet_(CONFIG.SHEET_FILES, HEADERS);
+  const sheet = getDataSheet_();
   const now = new Date();
   const rows = sheet.getLastRow() > 1
     ? sheet.getRange(2, 1, sheet.getLastRow() - 1, HEADERS.length).getValues()
@@ -515,7 +657,7 @@ function upsertRows_(found) {
 
   const seen = new Set();
   let added = 0;
-  found.forEach(([id, name, type, link, ownerName, ownerEmail, folders]) => {
+  found.forEach(([id, name, type, link, ownerName, ownerEmail, folders, path]) => {
     if (seen.has(id)) return; // file có nhiều thư mục cha
     seen.add(id);
 
@@ -525,7 +667,9 @@ function upsertRows_(found) {
       r[COL['Loại']] = type;
       r[COL['Link']] = link;
       r[COL['Thư mục chứa']] = folders;
+      r[COL['Đường dẫn thư mục']] = path;
       r[COL['Quét gần nhất']] = now;
+      if (r[COL['Nhắc']] === '') r[COL['Nhắc']] = wantsReminder_(r);
       // Đổi chủ sở hữu (vd chuyển cho người thứ 3) -> tính lại từ đầu.
       if (String(r[COL['Email chủ sở hữu']]).toLowerCase() !== String(ownerEmail).toLowerCase()) {
         r[COL['Nhắc gần nhất']] = '';
@@ -535,7 +679,7 @@ function upsertRows_(found) {
       r[COL['Email chủ sở hữu']] = ownerEmail;
       if (r[COL['Trạng thái']] === STATUS.DONE) r[COL['Trạng thái']] = STATUS.PENDING;
     } else {
-      rows.push([id, name, type, link, ownerName, ownerEmail, folders, now, now, STATUS.PENDING, '', 0]);
+      rows.push([id, name, type, link, ownerName, ownerEmail, folders, now, now, STATUS.PENDING, '', 0, path, true]);
       added++;
     }
   });
@@ -583,8 +727,9 @@ function appendRows_(sheet, rows) {
 /* ===================== BƯỚC 3: NHẮC ===================== */
 
 function sendReminders() {
-  const sheet = getSheet_(CONFIG.SHEET_FILES, HEADERS);
-  if (sheet.getLastRow() < 2) return notify_('Chưa có dữ liệu. Hãy chạy "Quét Drive" trước.');
+  syncListChecks_(); // lấy ô tick mới nhất ở tab Danh sách
+  const sheet = getDataSheet_();
+  if (sheet.getLastRow() < 2) return notify_('Chưa có dữ liệu. Hãy chạy "2. Quét file trong thư mục đã chọn" trước.');
 
   const me = Session.getEffectiveUser().getEmail().toLowerCase();
   const exclude = new Set(CONFIG.EXCLUDE_EMAILS.map(e => e.toLowerCase()));
@@ -598,7 +743,7 @@ function sendReminders() {
   rows.forEach((r, i) => {
     const email = String(r[COL['Email chủ sở hữu']]).trim().toLowerCase();
     if (!email || email === me || exclude.has(email)) return;
-    if (r[COL['Trạng thái']] !== STATUS.PENDING) return;
+    if (r[COL['Trạng thái']] === STATUS.DONE || !wantsReminder_(r)) return; // bỏ tick ở tab Danh sách
     if (Number(r[COL['Số lần nhắc']] || 0) >= CONFIG.MAX_REMINDERS) return;
     const o = byOwner[email] = byOwner[email] || { name: r[COL['Chủ sở hữu']], idx: [], last: 0 };
     o.idx.push(i);
@@ -642,7 +787,10 @@ function sendReminders() {
     }
   }
 
-  if (!CONFIG.DRY_RUN) range.setValues(rows);
+  if (!CONFIG.DRY_RUN) {
+    range.setValues(rows);
+    renderList_(); // cập nhật cột "Nhắc gần nhất", "Số lần nhắc"
+  }
   notify_(`Đã nhắc ${sent} người${CONFIG.DRY_RUN ? ' (chạy thử)' : ''}.`);
 }
 
