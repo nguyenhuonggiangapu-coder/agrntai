@@ -24,7 +24,7 @@ const CONFIG = {
   EXCLUDE_EMAILS: [],      // email không bao giờ nhắc, ví dụ: ['boss@company.com']
   DRY_RUN: false,          // true = chỉ ghi nhật ký, KHÔNG gửi email thật (dùng để chạy thử)
 
-  TIME_LIMIT_MS: 5 * 60 * 1000, // Apps Script giới hạn 6 phút / lần chạy
+  TIME_LIMIT_MS: 4 * 60 * 1000, // Apps Script giới hạn 6 phút / lần chạy, chừa thời gian ghi sheet
 };
 
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
@@ -55,12 +55,6 @@ function onOpen() {
     .addToUi();
 }
 
-/** Việc chạy hằng ngày: quét rồi nhắc. */
-function runDaily() {
-  scanDrive();
-  sendReminders();
-}
-
 function setupDailyTrigger() {
   removeTriggers();
   ScriptApp.newTrigger('runDaily').timeBased().everyDays(1).atHour(CONFIG.DAILY_HOUR).create();
@@ -73,80 +67,156 @@ function removeTriggers() {
     .forEach(t => ScriptApp.deleteTrigger(t));
 }
 
-/* ===================== BƯỚC 1 + 2: QUÉT ===================== */
+/* ===================== BƯỚC 1 + 2: QUÉT (tự chia nhiều lượt) =====================
+ * Drive lớn không quét xong trong 1 lần (giới hạn 6 phút, giới hạn bộ nhớ), nên:
+ * - Hàng đợi thư mục cần quét nằm ở tab ẩn "_Hàng đợi".
+ * - File tìm được ghi ngay vào tab ẩn "_Kết quả quét", không giữ trong bộ nhớ.
+ * - Gần hết giờ thì lưu vị trí, hẹn 1 phút sau tự chạy tiếp (continueScan).
+ * - Quét xong thì gộp kết quả vào tab "Danh sách".
+ */
 
-function scanDrive() {
-  const startedAt = Date.now();
-  getSheet_(CONFIG.SHEET_FILES, HEADERS); // tạo tab ngay để thấy script đã chạy
-  progress_('Bước 1/3: đang đọc các thư mục bạn sở hữu...');
-
-  // 1) Thư mục mình sở hữu (ở bất kỳ đâu trong Drive) = điểm xuất phát.
-  const folderName = {};
-  const scope = new Set();
-  forEachFile_(
-    "'me' in owners and mimeType = '" + FOLDER_MIME + "' and trashed = false",
-    'id,name',
-    startedAt,
-    f => { folderName[f.id] = f.name; scope.add(f.id); }
-  );
-
-  progress_(`Bước 2/3: ${scope.size} thư mục của bạn. Đang tìm file của người khác bên trong...`);
-
-  // 2) Chỉ hỏi Drive các mục KHÔNG do mình sở hữu nằm trong các thư mục đó.
-  //    Thư mục con của người khác -> đưa vào phạm vi và quét tiếp vòng sau.
-  const found = [];
-  let frontier = Array.from(scope);
-  while (frontier.length) {
-    const next = [];
-    for (let i = 0; i < frontier.length; i += PARENT_CHUNK) {
-      const parents = frontier.slice(i, i + PARENT_CHUNK).map(id => `'${id}' in parents`).join(' or ');
-      forEachFile_(
-        `not 'me' in owners and trashed = false and (${parents})`,
-        'id,name,mimeType,parents,webViewLink,owners(displayName,emailAddress)',
-        startedAt,
-        f => {
-          if (f.owners && f.owners.length) found.push(f);
-          if (f.mimeType === FOLDER_MIME && !scope.has(f.id)) {
-            scope.add(f.id);
-            folderName[f.id] = f.name;
-            next.push(f.id);
-          }
-        }
-      );
-    }
-    frontier = next;
-  }
-
-  progress_(`Bước 3/3: tìm thấy ${found.length} mục. Đang ghi vào sheet...`);
-
-  // 3) Ghi vào Sheet.
-  const result = upsertRows_(found, folderName);
-  log_('Quét', '', found.length,
-    `${scope.size} thư mục trong phạm vi; mới: ${result.added}; đã xử lý: ${result.done}`);
-  notify_(`Quét xong: ${found.length} mục không thuộc sở hữu của bạn (mới: ${result.added}).`);
-}
-
+const SHEET_QUEUE = '_Hàng đợi';
+const SHEET_TEMP = '_Kết quả quét';
+const QUEUE_HEADERS = ['Folder ID', 'Tên thư mục'];
+const TEMP_HEADERS = ['File ID', 'Tên file', 'Loại', 'Link', 'Chủ sở hữu', 'Email chủ sở hữu', 'Thư mục chứa'];
+const STATE_KEY = 'SCAN_STATE';
 const PARENT_CHUNK = 40; // số thư mục gộp trong 1 lần hỏi Drive
+const ITEM_FIELDS = 'id,name,mimeType,parents,webViewLink,owners(displayName,emailAddress)';
 
-/** Duyệt từng trang kết quả, không giữ toàn bộ trong bộ nhớ. */
-function forEachFile_(q, fileFields, startedAt, callback) {
-  let pageToken;
-  do {
-    if (Date.now() - startedAt > CONFIG.TIME_LIMIT_MS) {
-      throw new Error('Drive quá lớn, vượt giới hạn thời gian 1 lần chạy. Xem mục "Giới hạn" trong README.');
-    }
-    const res = Drive.Files.list({
-      q: q,
-      pageSize: 1000,
-      pageToken: pageToken,
-      fields: 'nextPageToken, files(' + fileFields + ')',
-    });
-    (res.files || []).forEach(callback);
-    pageToken = res.nextPageToken;
-  } while (pageToken);
+function scanDrive() { startScan_(false); }
+
+/** Việc chạy hằng ngày: quét, quét xong thì tự gửi nhắc. */
+function runDaily() { startScan_(true); }
+
+function startScan_(remindAfter) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return notify_('Đang có một lượt quét chạy, vui lòng đợi.');
+  try {
+    clearContinueTriggers_();
+    getSheet_(CONFIG.SHEET_FILES, HEADERS);
+    const queue = resetSheet_(SHEET_QUEUE, QUEUE_HEADERS);
+    resetSheet_(SHEET_TEMP, TEMP_HEADERS);
+    progress_('Bước 1/3: đang đọc các thư mục bạn sở hữu...');
+
+    let pageToken;
+    let total = 0;
+    do {
+      const res = Drive.Files.list({
+        q: "'me' in owners and mimeType = '" + FOLDER_MIME + "' and trashed = false",
+        pageSize: 1000,
+        pageToken: pageToken,
+        fields: 'nextPageToken, files(id,name)',
+      });
+      const files = res.files || [];
+      appendRows_(queue, files.map(f => [f.id, f.name]));
+      total += files.length;
+      pageToken = res.nextPageToken;
+    } while (pageToken);
+
+    saveState_({ pos: 0, n: 0, pageToken: null, found: 0, remindAfter: remindAfter, runs: 0 });
+    log_('Quét', '', 0, `Bắt đầu quét: ${total} thư mục bạn sở hữu`);
+  } finally {
+    lock.releaseLock();
+  }
+  continueScan();
 }
 
-function upsertRows_(found, folderName) {
+/** Chạy tiếp lượt quét đang dở. Được gọi tự động, không cần bấm. */
+function continueScan() {
+  clearContinueTriggers_();
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return;
+  let state;
+  try {
+    state = loadState_();
+    if (!state) return;
+    state.runs++;
+    const startedAt = Date.now();
+    const ss = getSpreadsheet_();
+    const queue = ss.getSheetByName(SHEET_QUEUE);
+    const temp = ss.getSheetByName(SHEET_TEMP);
+
+    while (true) {
+      const totalFolders = queue.getLastRow() - 1;
+      if (!state.pageToken) {
+        if (state.pos >= totalFolders) break;
+        state.n = Math.min(PARENT_CHUNK, totalFolders - state.pos);
+      }
+      const chunk = queue.getRange(state.pos + 2, 1, state.n, 2).getValues();
+      const names = {};
+      chunk.forEach(r => (names[r[0]] = r[1]));
+      const q = "not 'me' in owners and trashed = false and (" +
+        chunk.map(r => `'${r[0]}' in parents`).join(' or ') + ')';
+
+      do {
+        if (Date.now() - startedAt > CONFIG.TIME_LIMIT_MS) {
+          saveState_(state);
+          ScriptApp.newTrigger('continueScan').timeBased().after(60 * 1000).create();
+          const msg = `Đang quét: ${state.pos}/${totalFolders} thư mục, đã thấy ${state.found} mục. Sẽ tự chạy tiếp sau 1 phút.`;
+          log_('Quét', '', state.found, msg);
+          notify_(msg + ' Xem tiến độ ở tab Nhật ký.');
+          return;
+        }
+        const res = Drive.Files.list({
+          q: q,
+          pageSize: 1000,
+          pageToken: state.pageToken || undefined,
+          fields: 'nextPageToken, files(' + ITEM_FIELDS + ')',
+        });
+        const rows = [];
+        const subfolders = [];
+        (res.files || []).forEach(f => {
+          if (f.mimeType === FOLDER_MIME) subfolders.push([f.id, f.name]);
+          if (!f.owners || !f.owners.length) return;
+          const o = f.owners[0];
+          rows.push([
+            f.id, f.name, f.mimeType === FOLDER_MIME ? 'Thư mục' : 'File', f.webViewLink,
+            o.displayName || '', o.emailAddress || '',
+            (f.parents || []).map(p => names[p]).filter(Boolean).join(', '),
+          ]);
+        });
+        appendRows_(temp, rows);
+        appendRows_(queue, subfolders); // thư mục con của người khác -> quét tiếp
+        state.found += rows.length;
+        state.pageToken = res.nextPageToken || null;
+        saveState_(state);
+      } while (state.pageToken);
+
+      state.pos += state.n;
+      saveState_(state);
+      progress_(`Bước 2/3: đã quét ${state.pos}/${queue.getLastRow() - 1} thư mục, thấy ${state.found} mục...`);
+    }
+  } finally {
+    lock.releaseLock();
+  }
+  finishScan_(state);
+}
+
+function finishScan_(state) {
+  progress_(`Bước 3/3: tìm thấy ${state.found} mục. Đang ghi vào tab Danh sách...`);
+  const ss = getSpreadsheet_();
+  const temp = ss.getSheetByName(SHEET_TEMP);
+  const queue = ss.getSheetByName(SHEET_QUEUE);
+  const found = temp.getLastRow() > 1
+    ? temp.getRange(2, 1, temp.getLastRow() - 1, TEMP_HEADERS.length).getValues()
+    : [];
+  const folderCount = queue.getLastRow() - 1;
+
+  const result = upsertRows_(found);
+
+  temp.clear();
+  queue.clear();
+  PropertiesService.getScriptProperties().deleteProperty(STATE_KEY);
+  const msg = `Quét xong: ${folderCount} thư mục, ${result.total} mục không thuộc sở hữu của bạn ` +
+    `(mới: ${result.added}, đã xử lý: ${result.done})`;
+  log_('Quét', '', result.total, msg);
+  notify_(msg);
+
+  if (state.remindAfter) sendReminders();
+}
+
+/** found: các dòng theo TEMP_HEADERS. Gộp vào tab Danh sách. */
+function upsertRows_(found) {
   const sheet = getSheet_(CONFIG.SHEET_FILES, HEADERS);
   const now = new Date();
   const rows = sheet.getLastRow() > 1
@@ -157,32 +227,27 @@ function upsertRows_(found, folderName) {
 
   const seen = new Set();
   let added = 0;
-  found.forEach(f => {
-    const owner = f.owners[0];
-    const folders = (f.parents || []).map(p => folderName[p] || p).join(', ');
-    const type = f.mimeType === FOLDER_MIME ? 'Thư mục' : 'File';
-    seen.add(f.id);
+  found.forEach(([id, name, type, link, ownerName, ownerEmail, folders]) => {
+    if (seen.has(id)) return; // file có nhiều thư mục cha
+    seen.add(id);
 
-    if (f.id in rowById) {
-      const r = rows[rowById[f.id]];
-      r[COL['Tên file']] = f.name;
+    if (id in rowById) {
+      const r = rows[rowById[id]];
+      r[COL['Tên file']] = name;
       r[COL['Loại']] = type;
-      r[COL['Link']] = f.webViewLink;
+      r[COL['Link']] = link;
       r[COL['Thư mục chứa']] = folders;
       r[COL['Quét gần nhất']] = now;
       // Đổi chủ sở hữu (vd chuyển cho người thứ 3) -> tính lại từ đầu.
-      if (String(r[COL['Email chủ sở hữu']]).toLowerCase() !== (owner.emailAddress || '').toLowerCase()) {
+      if (String(r[COL['Email chủ sở hữu']]).toLowerCase() !== String(ownerEmail).toLowerCase()) {
         r[COL['Nhắc gần nhất']] = '';
         r[COL['Số lần nhắc']] = 0;
       }
-      r[COL['Chủ sở hữu']] = owner.displayName || '';
-      r[COL['Email chủ sở hữu']] = owner.emailAddress || '';
+      r[COL['Chủ sở hữu']] = ownerName;
+      r[COL['Email chủ sở hữu']] = ownerEmail;
       if (r[COL['Trạng thái']] === STATUS.DONE) r[COL['Trạng thái']] = STATUS.PENDING;
     } else {
-      rows.push([
-        f.id, f.name, type, f.webViewLink, owner.displayName || '', owner.emailAddress || '',
-        folders, now, now, STATUS.PENDING, '', 0,
-      ]);
+      rows.push([id, name, type, link, ownerName, ownerEmail, folders, now, now, STATUS.PENDING, '', 0]);
       added++;
     }
   });
@@ -197,7 +262,34 @@ function upsertRows_(found, folderName) {
   });
 
   if (rows.length) sheet.getRange(2, 1, rows.length, HEADERS.length).setValues(rows);
-  return { added: added, done: done };
+  return { total: seen.size, added: added, done: done };
+}
+
+function saveState_(state) {
+  PropertiesService.getScriptProperties().setProperty(STATE_KEY, JSON.stringify(state));
+}
+
+function loadState_() {
+  const s = PropertiesService.getScriptProperties().getProperty(STATE_KEY);
+  return s ? JSON.parse(s) : null;
+}
+
+function clearContinueTriggers_() {
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === 'continueScan')
+    .forEach(t => ScriptApp.deleteTrigger(t));
+}
+
+function resetSheet_(name, headers) {
+  const sheet = getSheet_(name, headers);
+  sheet.clear();
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
+  sheet.hideSheet();
+  return sheet;
+}
+
+function appendRows_(sheet, rows) {
+  if (rows.length) sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
 }
 
 /* ===================== BƯỚC 3: NHẮC ===================== */
@@ -268,10 +360,14 @@ function sendReminders() {
 
 function buildEmail_(ownerName, files) {
   const myEmail = Session.getEffectiveUser().getEmail();
-  const list = files.map(r =>
+  const MAX_LIST = 50; // email quá dài sẽ bị Gmail cắt
+  const more = files.length > MAX_LIST
+    ? `<tr><td colspan="2" style="padding:4px 8px;color:#555">... và ${files.length - MAX_LIST} file khác</td></tr>`
+    : '';
+  const list = files.slice(0, MAX_LIST).map(r =>
     `<tr><td style="padding:4px 8px"><a href="${esc_(r[COL['Link']])}">${esc_(r[COL['Tên file']])}</a></td>` +
     `<td style="padding:4px 8px;color:#555">${esc_(r[COL['Thư mục chứa']])}</td></tr>`
-  ).join('');
+  ).join('') + more;
   return `
     <p>Chào ${esc_(ownerName || 'bạn')},</p>
     <p>Các file dưới đây đang nằm trong thư mục Drive của mình nhưng vẫn do bạn sở hữu.

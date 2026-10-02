@@ -37,6 +37,6 @@ Script Google Apps Script, chạy bằng chính tài khoản của Giang:
 - **Shared drive** (Bộ nhớ dùng chung) không có chủ sở hữu cá nhân nên script không quét.
 - **Hạn mức email:** Gmail cá nhân gửi được ~100 email/ngày qua Apps Script. Vượt thì script ghi nhật ký và gửi tiếp vào hôm sau.
 
-## Giới hạn
+## Drive lớn
 
-Mỗi lần chạy Apps Script tối đa 6 phút. Drive vài chục nghìn file vẫn chạy được. Nếu gặp lỗi *"Drive quá lớn, vượt giới hạn thời gian"*, báo lại để nâng cấp sang chế độ quét chia nhiều lượt.
+Script tự chia nhiều lượt: mỗi lượt chạy khoảng 4 phút, ghi kết quả vào tab ẩn, rồi hẹn 1 phút sau tự chạy tiếp cho tới khi xong. Theo dõi tiến độ ở tab `Nhật ký` (dòng "Đang quét: x/y thư mục..."). Khi thấy dòng **"Quét xong"** thì tab `Danh sách` đã có đủ dữ liệu. Hai tab `_Hàng đợi` và `_Kết quả quét` là tab ẩn dùng tạm, không cần đụng vào.
