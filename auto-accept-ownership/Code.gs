@@ -12,7 +12,7 @@ const CONFIG = {
   ALLOWED_EMAILS: [],              // ví dụ: ['nhanvien1@gmail.com']
   ALLOWED_DOMAINS: [],             // ví dụ: ['mankai.edu.vn']
   DRY_RUN: true,                   // true = chỉ ghi nhật ký, chưa nhận thật
-  INTERVAL_MINUTES: 15,            // 5, 10, 15 hoặc 30
+  INTERVAL_MINUTES: 15,            // 5, 10, 15, 30 hoặc 60 — chạy countCandidates để biết nên chọn số nào
   MAX_RUNTIME_MS: 4.5 * 60 * 1000, // mỗi lượt tối đa ~4,5 phút, còn lại lượt sau làm tiếp
   LOG_SHEET_NAME: 'Nhật ký nhận quyền',
 };
@@ -30,10 +30,11 @@ function acceptPendingOwnerships() {
     const props = PropertiesService.getScriptProperties();
     const me = Drive.About.get({ fields: 'user(permissionId,emailAddress)' }).user;
     let pageToken = props.getProperty(PROP_PAGE_TOKEN) || null;
-    const stats = { checked: 0, pending: 0, accepted: 0, notAllowed: 0, errors: 0 };
+    const stats = { checked: 0, pending: 0, accepted: 0, notAllowed: 0, errors: 0, apiCalls: 1 };
 
     do {
       let res;
+      stats.apiCalls++;
       try {
         res = Drive.Files.list({
           q: "'me' in writers and not 'me' in owners and trashed = false",
@@ -78,6 +79,7 @@ function acceptPendingOwnerships() {
     if (pageToken) props.setProperty(PROP_PAGE_TOKEN, pageToken);
     else props.deleteProperty(PROP_PAGE_TOKEN);
 
+    stats.seconds = Math.round((Date.now() - start) / 1000);
     console.log(JSON.stringify(stats) + (pageToken ? ' — CHƯA quét hết, lượt sau làm tiếp' : ' — đã quét hết'));
   } finally {
     lock.releaseLock();
@@ -119,10 +121,40 @@ function log_(action, file, ownerEmail) {
   ss.getSheets()[0].appendRow([new Date(), action, file.name, ownerEmail, file.webViewLink || '']);
 }
 
+/**
+ * Đếm trước số file cần kiểm tra (chỉ đọc, không nhận gì) và gợi ý tần suất chạy.
+ * Rất nhẹ: mỗi lần gọi API đếm được 1.000 file.
+ */
+function countCandidates() {
+  const start = Date.now();
+  let count = 0, calls = 0, pageToken = null;
+  do {
+    const res = Drive.Files.list({
+      q: "'me' in writers and not 'me' in owners and trashed = false",
+      pageSize: 1000,
+      pageToken: pageToken || undefined,
+      fields: 'nextPageToken, files(id)',
+    });
+    calls++;
+    count += (res.files || []).length;
+    pageToken = res.nextPageToken || null;
+  } while (pageToken);
+
+  const callsPerRun = Math.max(1, Math.ceil(count / 100)) + 1;
+  const suggested = callsPerRun <= 50 ? 15 : callsPerRun <= 150 ? 30 : 60;
+  console.log(
+    'Số file cần kiểm tra mỗi lượt: ' + count + '\n' +
+    'Số lần gọi API mỗi lượt: ~' + callsPerRun + '\n' +
+    'Đếm mất ' + Math.round((Date.now() - start) / 1000) + ' giây, ' + calls + ' lần gọi API\n' +
+    'Gợi ý INTERVAL_MINUTES: ' + suggested
+  );
+}
+
 /** Chạy 1 lần để bật tự động. */
 function installTrigger() {
   removeTrigger();
-  ScriptApp.newTrigger('acceptPendingOwnerships').timeBased().everyMinutes(CONFIG.INTERVAL_MINUTES).create();
+  const builder = ScriptApp.newTrigger('acceptPendingOwnerships').timeBased();
+  (CONFIG.INTERVAL_MINUTES >= 60 ? builder.everyHours(1) : builder.everyMinutes(CONFIG.INTERVAL_MINUTES)).create();
   acceptPendingOwnerships();
 }
 

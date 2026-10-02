@@ -13,9 +13,10 @@ Mỗi 15 phút, script chạy trên máy chủ Google (không cần mở máy): 
 1. Vào https://script.google.com bằng **tài khoản nhận quyền** → *Dự án mới*.
 2. *Cài đặt dự án* (bánh răng) → tick **Hiển thị tệp kê khai "appsscript.json"**. Dán nội dung `appsscript.json` vào.
 3. Mở `Code.gs`, xoá code mẫu, dán nội dung `Code.gs`. Bấm **Lưu**.
-4. Chọn hàm `acceptPendingOwnerships` → **Chạy** → cấp quyền (Nâng cao → Đi tới… → Cho phép).
-5. Lần đầu đang để `DRY_RUN: true`: chỉ ghi nhật ký. Chạy `showLogLink` để lấy link sheet `Nhật ký nhận quyền`, xem danh sách file sẽ được nhận.
-6. Ổn thì sửa `DRY_RUN: false`, Lưu, chạy `installTrigger`. Xong.
+4. Chọn hàm `countCandidates` → **Chạy** → cấp quyền (Nâng cao → Đi tới… → Cho phép). Xem *Nhật ký thực thi*: số file cần kiểm tra mỗi lượt và tần suất gợi ý → sửa `INTERVAL_MINUTES` theo gợi ý.
+5. Chọn hàm `acceptPendingOwnerships` → **Chạy**.
+6. Lần đầu đang để `DRY_RUN: true`: chỉ ghi nhật ký. Chạy `showLogLink` để lấy link sheet `Nhật ký nhận quyền`, xem danh sách file sẽ được nhận.
+7. Ổn thì sửa `DRY_RUN: false`, Lưu, chạy `installTrigger`. Xong.
 
 Tắt tự động: chạy `removeTrigger`.
 
