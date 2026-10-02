@@ -77,56 +77,59 @@ function removeTriggers() {
 
 function scanDrive() {
   const startedAt = Date.now();
-  const me = Session.getEffectiveUser().getEmail().toLowerCase();
   getSheet_(CONFIG.SHEET_FILES, HEADERS); // tạo tab ngay để thấy script đã chạy
-  progress_('Bước 1/3: đang đọc danh sách thư mục...');
+  progress_('Bước 1/3: đang đọc các thư mục bạn sở hữu...');
 
-  // 1) Toàn bộ thư mục mình truy cập được -> dựng cây cha/con.
-  const folders = listAll_(
-    "mimeType = '" + FOLDER_MIME + "' and trashed = false",
-    'id,name,parents,owners(emailAddress)',
-    startedAt
-  );
+  // 1) Thư mục mình sở hữu (ở bất kỳ đâu trong Drive) = điểm xuất phát.
   const folderName = {};
-  const children = {};
-  folders.forEach(f => {
-    folderName[f.id] = f.name;
-    (f.parents || []).forEach(p => (children[p] = children[p] || []).push(f.id));
-  });
-
-  // 2) Phạm vi = thư mục mình sở hữu + mọi thư mục con (kể cả thư mục con của người khác).
   const scope = new Set();
-  const queue = folders.filter(f => isOwnedBy_(f, me)).map(f => f.id);
-  while (queue.length) {
-    const id = queue.pop();
-    if (scope.has(id)) continue;
-    scope.add(id);
-    (children[id] || []).forEach(c => queue.push(c));
+  forEachFile_(
+    "'me' in owners and mimeType = '" + FOLDER_MIME + "' and trashed = false",
+    'id,name',
+    startedAt,
+    f => { folderName[f.id] = f.name; scope.add(f.id); }
+  );
+
+  progress_(`Bước 2/3: ${scope.size} thư mục của bạn. Đang tìm file của người khác bên trong...`);
+
+  // 2) Chỉ hỏi Drive các mục KHÔNG do mình sở hữu nằm trong các thư mục đó.
+  //    Thư mục con của người khác -> đưa vào phạm vi và quét tiếp vòng sau.
+  const found = [];
+  let frontier = Array.from(scope);
+  while (frontier.length) {
+    const next = [];
+    for (let i = 0; i < frontier.length; i += PARENT_CHUNK) {
+      const parents = frontier.slice(i, i + PARENT_CHUNK).map(id => `'${id}' in parents`).join(' or ');
+      forEachFile_(
+        `not 'me' in owners and trashed = false and (${parents})`,
+        'id,name,mimeType,parents,webViewLink,owners(displayName,emailAddress)',
+        startedAt,
+        f => {
+          if (f.owners && f.owners.length) found.push(f);
+          if (f.mimeType === FOLDER_MIME && !scope.has(f.id)) {
+            scope.add(f.id);
+            folderName[f.id] = f.name;
+            next.push(f.id);
+          }
+        }
+      );
+    }
+    frontier = next;
   }
 
-  progress_(`Bước 2/3: ${scope.size} thư mục trong phạm vi. Đang tìm file của người khác...`);
+  progress_(`Bước 3/3: tìm thấy ${found.length} mục. Đang ghi vào sheet...`);
 
-  // 3) Mọi file/thư mục KHÔNG do mình sở hữu, chỉ giữ cái nằm trong phạm vi.
-  const items = listAll_(
-    "not 'me' in owners and trashed = false",
-    'id,name,mimeType,parents,webViewLink,owners(displayName,emailAddress)',
-    startedAt
-  );
-  const found = items.filter(f =>
-    f.owners && f.owners.length && (f.parents || []).some(p => scope.has(p))
-  );
-
-  progress_(`Bước 3/3: tìm thấy ${found.length} file. Đang ghi vào sheet...`);
-
-  // 4) Ghi vào Sheet.
+  // 3) Ghi vào Sheet.
   const result = upsertRows_(found, folderName);
   log_('Quét', '', found.length,
     `${scope.size} thư mục trong phạm vi; mới: ${result.added}; đã xử lý: ${result.done}`);
-  notify_(`Quét xong: ${found.length} file không thuộc sở hữu của bạn (mới: ${result.added}).`);
+  notify_(`Quét xong: ${found.length} mục không thuộc sở hữu của bạn (mới: ${result.added}).`);
 }
 
-function listAll_(q, fileFields, startedAt) {
-  const out = [];
+const PARENT_CHUNK = 40; // số thư mục gộp trong 1 lần hỏi Drive
+
+/** Duyệt từng trang kết quả, không giữ toàn bộ trong bộ nhớ. */
+function forEachFile_(q, fileFields, startedAt, callback) {
   let pageToken;
   do {
     if (Date.now() - startedAt > CONFIG.TIME_LIMIT_MS) {
@@ -138,14 +141,9 @@ function listAll_(q, fileFields, startedAt) {
       pageToken: pageToken,
       fields: 'nextPageToken, files(' + fileFields + ')',
     });
-    out.push(...(res.files || []));
+    (res.files || []).forEach(callback);
     pageToken = res.nextPageToken;
   } while (pageToken);
-  return out;
-}
-
-function isOwnedBy_(file, email) {
-  return (file.owners || []).some(o => (o.emailAddress || '').toLowerCase() === email);
 }
 
 function upsertRows_(found, folderName) {
