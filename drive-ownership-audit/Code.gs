@@ -48,6 +48,7 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Rà soát Drive')
     .addItem('1. Quét cấu trúc thư mục', 'scanFolders')
+    .addItem('   Thu gọn cây thư mục', 'collapseFolders')
     .addItem('2. Quét file trong thư mục đã chọn', 'scanDrive')
     .addItem('3. Gửi email nhắc ngay', 'sendReminders')
     .addSeparator()
@@ -176,12 +177,14 @@ function scanFolders_() {
   const levels = rows.map(r => r[FC['Cấp']]);
   const maxDepth = Math.min(8, Math.max.apply(null, levels));
   let calls = 0;
+  const groups = [];
   for (let k = 1; k < maxDepth && calls < MAX_GROUP_CALLS; k++) {
     let start = -1;
     for (let i = 0; i <= levels.length; i++) {
       if (i < levels.length && levels[i] > k) { if (start < 0) start = i; continue; }
       if (start >= 0) {
         sheet.getRange(start + 2, 1, i - start, 1).shiftRowGroupDepth(1);
+        groups.push([start + 2, k]);
         calls++;
         start = -1;
       }
@@ -189,9 +192,29 @@ function scanFolders_() {
   }
   if (calls) {
     sheet.setRowGroupControlPosition(SpreadsheetApp.GroupControlTogglePosition.BEFORE);
-    sheet.collapseAllRowGroups();
+    collapseTree_(sheet, groups);
   }
   return rows.length - headerRows.length;
+}
+
+/** Thu gọn mọi lớp: chỉ hiện thư mục lớp 1, bấm + ở đâu mới mở ra 1 lớp ở đó. */
+function collapseTree_(sheet, groups) {
+  SpreadsheetApp.flush(); // nhóm vừa tạo phải được ghi xong thì mới thu gọn được
+  try { sheet.collapseAllRowGroups(); } catch (e) { /* thử cách dưới */ }
+  // Thu gọn từng nhóm, lớp sâu trước, để khi mở lớp ngoài thì lớp trong vẫn đóng.
+  groups.slice().sort((a, b) => b[1] - a[1]).forEach(([row, depth]) => {
+    try { sheet.getRowGroup(row, depth).collapse(); } catch (e) { /* bỏ qua */ }
+  });
+  SpreadsheetApp.flush();
+}
+
+/** Menu: thu gọn lại cây thư mục bất cứ lúc nào. */
+function collapseFolders() {
+  const sheet = getSpreadsheet_().getSheetByName(SHEET_FOLDERS);
+  if (!sheet) return notify_('Chưa có tab ' + SHEET_FOLDERS + '. Hãy chạy "1. Quét cấu trúc thư mục".');
+  SpreadsheetApp.flush();
+  sheet.collapseAllRowGroups();
+  sheet.activate();
 }
 
 /** Tick/bỏ tick thư mục mẹ -> áp dụng cho toàn bộ thư mục con bên dưới. Tự chạy khi sửa ô. */
