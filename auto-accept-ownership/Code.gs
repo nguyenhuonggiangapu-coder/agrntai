@@ -12,13 +12,15 @@ const CONFIG = {
   ALLOWED_EMAILS: [],              // ví dụ: ['nhanvien1@gmail.com']
   ALLOWED_DOMAINS: [],             // ví dụ: ['mankai.edu.vn']
   DRY_RUN: true,                   // true = chỉ ghi nhật ký, chưa nhận thật
-  INTERVAL_MINUTES: 15,            // 5, 10, 15, 30 hoặc 60 — chạy countCandidates để biết nên chọn số nào
-  MAX_RUNTIME_MS: 4.5 * 60 * 1000, // mỗi lượt tối đa ~4,5 phút, còn lại lượt sau làm tiếp
+  RUN_HOUR: 6,                     // chạy mỗi ngày 1 lần, khoảng 6h–7h sáng
+  MAX_RUNTIME_MS: 4.5 * 60 * 1000, // mỗi lượt tối đa ~4,5 phút; chưa xong thì 1 phút sau tự chạy tiếp
   LOG_SHEET_NAME: 'Nhật ký nhận quyền',
 };
 
 const PROP_PAGE_TOKEN = 'pageToken';
 const PROP_LOG_ID = 'logSpreadsheetId';
+const MAIN_HANDLER = 'acceptPendingOwnerships';
+const CONTINUE_HANDLER = 'continueAccepting';
 
 /** Hàm chính — trigger gọi hàm này. */
 function acceptPendingOwnerships() {
@@ -76,14 +78,24 @@ function acceptPendingOwnerships() {
       pageToken = res.nextPageToken || null;
     } while (pageToken && Date.now() - start < CONFIG.MAX_RUNTIME_MS);
 
-    if (pageToken) props.setProperty(PROP_PAGE_TOKEN, pageToken);
-    else props.deleteProperty(PROP_PAGE_TOKEN);
+    deleteTriggers_(CONTINUE_HANDLER);
+    if (pageToken) {
+      props.setProperty(PROP_PAGE_TOKEN, pageToken);
+      ScriptApp.newTrigger(CONTINUE_HANDLER).timeBased().after(60 * 1000).create();
+    } else {
+      props.deleteProperty(PROP_PAGE_TOKEN);
+    }
 
     stats.seconds = Math.round((Date.now() - start) / 1000);
-    console.log(JSON.stringify(stats) + (pageToken ? ' — CHƯA quét hết, lượt sau làm tiếp' : ' — đã quét hết'));
+    console.log(JSON.stringify(stats) + (pageToken ? ' — CHƯA quét hết, 1 phút nữa tự chạy tiếp' : ' — đã quét hết'));
   } finally {
     lock.releaseLock();
   }
+}
+
+/** Lượt chạy tiếp khi Drive lớn, không xong trong một lượt. */
+function continueAccepting() {
+  acceptPendingOwnerships();
 }
 
 /** Quyền của mình trên file có đang ở trạng thái chờ nhận sở hữu không. */
@@ -140,27 +152,31 @@ function countCandidates() {
     pageToken = res.nextPageToken || null;
   } while (pageToken);
 
-  const callsPerRun = Math.max(1, Math.ceil(count / 100)) + 1;
-  const suggested = callsPerRun <= 50 ? 15 : callsPerRun <= 150 ? 30 : 60;
+  const estCalls = Math.max(1, Math.ceil(count / 100)) + 1;
   console.log(
-    'Số file cần kiểm tra mỗi lượt: ' + count + '\n' +
-    'Số lần gọi API mỗi lượt: ~' + callsPerRun + '\n' +
-    'Đếm mất ' + Math.round((Date.now() - start) / 1000) + ' giây, ' + calls + ' lần gọi API\n' +
-    'Gợi ý INTERVAL_MINUTES: ' + suggested
+    'Số file cần kiểm tra mỗi ngày: ' + count + '\n' +
+    'Số lần gọi API mỗi ngày: ~' + estCalls + '\n' +
+    'Thời gian chạy ước tính: ~' + Math.ceil(estCalls * 0.5) + ' giây/ngày (hạn mức miễn phí: 90 phút/ngày)\n' +
+    'Đếm mất ' + Math.round((Date.now() - start) / 1000) + ' giây, ' + calls + ' lần gọi API'
   );
 }
 
 /** Chạy 1 lần để bật tự động. */
 function installTrigger() {
   removeTrigger();
-  const builder = ScriptApp.newTrigger('acceptPendingOwnerships').timeBased();
-  (CONFIG.INTERVAL_MINUTES >= 60 ? builder.everyHours(1) : builder.everyMinutes(CONFIG.INTERVAL_MINUTES)).create();
+  ScriptApp.newTrigger(MAIN_HANDLER).timeBased().everyDays(1).atHour(CONFIG.RUN_HOUR).create();
   acceptPendingOwnerships();
 }
 
 function removeTrigger() {
+  deleteTriggers_(MAIN_HANDLER);
+  deleteTriggers_(CONTINUE_HANDLER);
+  PropertiesService.getScriptProperties().deleteProperty(PROP_PAGE_TOKEN);
+}
+
+function deleteTriggers_(handler) {
   ScriptApp.getProjectTriggers()
-    .filter(t => t.getHandlerFunction() === 'acceptPendingOwnerships')
+    .filter(t => t.getHandlerFunction() === handler)
     .forEach(t => ScriptApp.deleteTrigger(t));
 }
 
