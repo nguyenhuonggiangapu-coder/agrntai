@@ -76,10 +76,11 @@ function removeTriggers() {
  */
 
 const SHEET_FOLDERS = 'Chọn thư mục';
-const FOLDER_HEADERS = ['Chọn', 'Thư mục', 'Đường dẫn', 'Kết quả quét', 'Quét lúc', 'Link',
+const FOLDER_HEADERS = ['Chọn', 'Thư mục', 'Chủ sở hữu', 'Đường dẫn', 'Kết quả quét', 'Quét lúc', 'Link',
   'Folder ID', 'Parent ID', 'Tên', 'Cấp'];
 const FC = FOLDER_HEADERS.reduce((m, h, i) => { m[h] = i; return m; }, {});
 const MAX_GROUP_CALLS = 1500; // cây quá lớn thì bỏ bớt nút +/- để không quá giờ
+const MAX_PARENT_LOOKUPS = 300; // số thư mục mẹ của người khác tra tên/chủ sở hữu
 
 function scanFolders() {
   scanFolders_();
@@ -110,9 +111,11 @@ function scanFolders_() {
       q: "'me' in owners and mimeType = '" + FOLDER_MIME + "' and trashed = false",
       pageSize: 1000,
       pageToken: pageToken,
-      fields: 'nextPageToken, files(id,name,parents)',
+      fields: 'nextPageToken, files(id,name,parents,owners(displayName,emailAddress))',
     });
-    (res.files || []).forEach(f => (info[f.id] = { name: f.name, parent: (f.parents || [])[0] || '' }));
+    (res.files || []).forEach(f => (info[f.id] = {
+      name: f.name, parent: (f.parents || [])[0] || '', owner: ownerLabel_((f.owners || [])[0]),
+    }));
     pageToken = res.nextPageToken;
   } while (pageToken);
 
@@ -138,22 +141,48 @@ function scanFolders_() {
     const label = (depth === 1 ? '📁 ' : '　　'.repeat(depth - 2) + '└ ') + name +
       (n ? `  (${n} thư mục con)` : '');
     const prev = old[id] || [false, '', ''];
-    rows.push([prev[0], label, p.join(' / '), prev[1], prev[2],
+    rows.push([prev[0], label, info[id].owner, p.join(' / '), prev[1], prev[2],
       'https://drive.google.com/drive/folders/' + id, id, info[id].parent, name, depth]);
     (kids[id] || []).forEach(c => walk(c, depth + 1, p));
   };
   const roots = Object.keys(info).filter(id => !info[info[id].parent]).sort(byName);
-  const sections = [
-    ['▼ DRIVE CỦA TÔI', roots.filter(id => info[id].parent === myDriveId)],
-    ['▼ THƯ MỤC CỦA BẠN NẰM TRONG THƯ MỤC NGƯỜI KHÁC', roots.filter(id => info[id].parent !== myDriveId)],
-  ];
-  const headerRows = [];
-  sections.forEach(([title, list]) => {
-    if (!list.length) return;
-    headerRows.push(rows.length);
-    rows.push(['', title, '', '', '', '', '', '', '', 0]);
-    list.forEach(id => walk(id, 1, []));
-  });
+  const blank = () => FOLDER_HEADERS.map(() => '');
+  const headerRows = [];   // tiêu đề nhóm lớn
+  const parentRows = [];   // thư mục mẹ của người khác (không tick được)
+  const addTitle = (list, label, owner) => {
+    const r = blank(); r[FC['Thư mục']] = label; r[FC['Chủ sở hữu']] = owner || ''; r[FC['Cấp']] = 0;
+    list.push(rows.length); rows.push(r);
+  };
+
+  const mine = roots.filter(id => info[id].parent === myDriveId);
+  if (mine.length) {
+    addTitle(headerRows, '▼ DRIVE CỦA TÔI');
+    mine.forEach(id => walk(id, 1, []));
+  }
+
+  // Thư mục của bạn nằm trong thư mục người khác -> gom theo thư mục mẹ, ghi rõ tên + chủ sở hữu.
+  const others = roots.filter(id => info[id].parent !== myDriveId);
+  if (others.length) {
+    addTitle(headerRows, '▼ THƯ MỤC CỦA BẠN NẰM TRONG THƯ MỤC NGƯỜI KHÁC');
+    const byParent = {};
+    others.forEach(id => (byParent[info[id].parent] = byParent[info[id].parent] || []).push(id));
+    const parents = Object.keys(byParent).map((pid, i) => {
+      let name = 'Không xem được thư mục mẹ (không có quyền truy cập)', owner = '';
+      if (pid && i < MAX_PARENT_LOOKUPS) {
+        try {
+          const f = Drive.Files.get(pid, { fields: 'name,owners(displayName,emailAddress)' });
+          name = f.name;
+          owner = f.owners && f.owners.length ? ownerLabel_(f.owners[0]) : 'Bộ nhớ dùng chung';
+        } catch (e) { /* không có quyền xem thư mục mẹ */ }
+      }
+      return { pid: pid, name: name, owner: owner };
+    });
+    parents.sort((a, b) => (a.owner + a.name).localeCompare(b.owner + b.name, 'vi'));
+    parents.forEach(p => {
+      addTitle(parentRows, '👤 Trong thư mục: ' + p.name, p.owner);
+      byParent[p.pid].forEach(id => walk(id, 1, [p.name]));
+    });
+  }
 
   // Tạo lại tab từ đầu (cách sạch nhất để xoá các nhóm +/- cũ).
   const index = sheet ? sheet.getIndex() : ss.getNumSheets() + 1;
@@ -163,13 +192,15 @@ function scanFolders_() {
   sheet.setFrozenRows(1);
   sheet.hideColumns(FC['Folder ID'] + 1, 4);
   sheet.setColumnWidth(FC['Thư mục'] + 1, 420);
+  sheet.setColumnWidth(FC['Chủ sở hữu'] + 1, 260);
   if (!rows.length) return 0;
 
   sheet.getRange(2, 1, rows.length, FOLDER_HEADERS.length).setValues(rows);
   sheet.getRange(2, 1, rows.length, 1).insertCheckboxes();
-  const a1 = i => 'A' + (i + 2) + ':E' + (i + 2);
-  sheet.getRangeList(headerRows.map(a1)).removeCheckboxes();
+  const a1 = i => 'A' + (i + 2) + ':F' + (i + 2);
+  sheet.getRangeList(headerRows.concat(parentRows).map(a1)).removeCheckboxes();
   sheet.getRangeList(headerRows.map(a1)).setFontWeight('bold').setBackground('#e8eaed');
+  if (parentRows.length) sheet.getRangeList(parentRows.map(a1)).setFontStyle('italic').setBackground('#f8f9fa');
   const level1 = rows.map((r, i) => (r[FC['Cấp']] === 1 ? i : -1)).filter(i => i >= 0);
   if (level1.length) sheet.getRangeList(level1.map(i => 'B' + (i + 2))).setFontWeight('bold');
 
@@ -194,7 +225,12 @@ function scanFolders_() {
     sheet.setRowGroupControlPosition(SpreadsheetApp.GroupControlTogglePosition.BEFORE);
     collapseTree_(sheet, groups);
   }
-  return rows.length - headerRows.length;
+  return rows.length - headerRows.length - parentRows.length;
+}
+
+function ownerLabel_(o) {
+  if (!o) return '';
+  return o.displayName && o.emailAddress ? `${o.displayName} (${o.emailAddress})` : (o.displayName || o.emailAddress || '');
 }
 
 /** Thu gọn mọi lớp: chỉ hiện thư mục lớp 1, bấm + ở đâu mới mở ra 1 lớp ở đó. */
