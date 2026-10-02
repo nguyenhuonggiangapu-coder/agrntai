@@ -19,8 +19,8 @@ Script Google Apps Script, chạy bằng chính tài khoản của Giang:
 
 ## Chạy
 
-1. **Rà soát Drive → 1. Quét cấu trúc thư mục**. Script chỉ đọc danh sách thư mục bạn sở hữu (rất nhanh) và ghi ra tab `Chọn thư mục`, có thụt lề theo cấp và cột đường dẫn. Lần đầu Google sẽ hỏi cấp quyền → chọn tài khoản → *Nâng cao* → *Đi tới (không an toàn)* → *Cho phép*.
-2. Ở tab `Chọn thư mục`, **tick ô "Chọn"** ở thư mục muốn rà soát. Tick thư mục cha là đủ, thư mục con tự được tính theo.
+1. **Rà soát Drive → 1. Quét cấu trúc thư mục**. Script chỉ đọc danh sách thư mục bạn sở hữu (rất nhanh) và ghi ra tab `Chọn thư mục` dạng **cây từ to đến bé**: 📁 là thư mục cấp 1, `└` là thư mục con; bấm dấu **+ / −** bên trái số dòng để mở/thu gọn. Nhóm `DRIVE CỦA TÔI` là thư mục nằm trong Drive của bạn; nhóm `NẰM TRONG THƯ MỤC NGƯỜI KHÁC` là thư mục bạn tạo bên trong thư mục người khác chia sẻ. Lần đầu Google sẽ hỏi cấp quyền → chọn tài khoản → *Nâng cao* → *Đi tới (không an toàn)* → *Cho phép*.
+2. Ở tab `Chọn thư mục`, **tick ô "Chọn"** ở thư mục muốn rà soát. Tick thư mục mẹ thì **toàn bộ thư mục con tự được tick** (bỏ tick cũng vậy). Muốn loại riêng một thư mục con thì bỏ tick nó: chỉ thư mục đang được tick mới được quét.
 3. **Rà soát Drive → 2. Quét file trong thư mục đã chọn**. Kết quả ra tab `Danh sách`. Nếu không muốn nhắc file nào, đổi cột **Trạng thái** thành `Bỏ qua`.
 4. **Chạy thử trước khi gửi thật:** đặt `DRY_RUN: true` → chạy **3. Gửi email nhắc ngay** → xem tab `Nhật ký` xem sẽ gửi cho ai. Ổn thì đổi lại `DRY_RUN: false`.
 5. **Rà soát Drive → Bật chạy tự động hằng ngày**. Mỗi sáng ~7h script tự cập nhật cây thư mục (giữ nguyên ô đã tick), quét các thư mục đã chọn, rồi nhắc.
