@@ -89,6 +89,7 @@ function acceptPendingOwnerships() {
     stats.seconds = Math.round((Date.now() - start) / 1000);
     console.log(JSON.stringify(stats) + (pageToken ? ' — CHƯA quét hết, 1 phút nữa tự chạy tiếp' : ' — đã quét hết'));
   } finally {
+    flushLog_();
     lock.releaseLock();
   }
 }
@@ -119,8 +120,16 @@ function isAllowedSender_(email) {
     CONFIG.ALLOWED_DOMAINS.some(d => e.endsWith('@' + d.toLowerCase()));
 }
 
-/** Ghi nhật ký vào một Google Sheet riêng (tự tạo lần đầu). */
+/** Gom nhật ký trong bộ nhớ, cuối lượt ghi vào Sheet một lần (ghi từng dòng rất chậm). */
+const LOG_BUFFER = [];
+
 function log_(action, file, ownerEmail) {
+  LOG_BUFFER.push([new Date(), action, file.name, ownerEmail, file.webViewLink || '']);
+}
+
+/** Ghi nhật ký vào một Google Sheet riêng (tự tạo lần đầu). */
+function flushLog_() {
+  if (!LOG_BUFFER.length) return;
   const props = PropertiesService.getScriptProperties();
   let ss;
   const id = props.getProperty(PROP_LOG_ID);
@@ -130,7 +139,9 @@ function log_(action, file, ownerEmail) {
     ss.getSheets()[0].appendRow(['Thời gian', 'Kết quả', 'Tên file', 'Người chuyển', 'Link']);
     props.setProperty(PROP_LOG_ID, ss.getId());
   }
-  ss.getSheets()[0].appendRow([new Date(), action, file.name, ownerEmail, file.webViewLink || '']);
+  const sheet = ss.getSheets()[0];
+  sheet.getRange(sheet.getLastRow() + 1, 1, LOG_BUFFER.length, LOG_BUFFER[0].length).setValues(LOG_BUFFER);
+  LOG_BUFFER.length = 0;
 }
 
 /**
