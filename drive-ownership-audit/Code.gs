@@ -78,6 +78,8 @@ function removeTriggers() {
 function scanDrive() {
   const startedAt = Date.now();
   const me = Session.getEffectiveUser().getEmail().toLowerCase();
+  getSheet_(CONFIG.SHEET_FILES, HEADERS); // tạo tab ngay để thấy script đã chạy
+  progress_('Bước 1/3: đang đọc danh sách thư mục...');
 
   // 1) Toàn bộ thư mục mình truy cập được -> dựng cây cha/con.
   const folders = listAll_(
@@ -102,6 +104,8 @@ function scanDrive() {
     (children[id] || []).forEach(c => queue.push(c));
   }
 
+  progress_(`Bước 2/3: ${scope.size} thư mục trong phạm vi. Đang tìm file của người khác...`);
+
   // 3) Mọi file/thư mục KHÔNG do mình sở hữu, chỉ giữ cái nằm trong phạm vi.
   const items = listAll_(
     "not 'me' in owners and trashed = false",
@@ -111,6 +115,8 @@ function scanDrive() {
   const found = items.filter(f =>
     f.owners && f.owners.length && (f.parents || []).some(p => scope.has(p))
   );
+
+  progress_(`Bước 3/3: tìm thấy ${found.length} file. Đang ghi vào sheet...`);
 
   // 4) Ghi vào Sheet.
   const result = upsertRows_(found, folderName);
@@ -307,6 +313,11 @@ function getSheet_(name, headers) {
 function log_(action, email, count, note) {
   getSheet_(CONFIG.SHEET_LOG, ['Thời gian', 'Hành động', 'Email', 'Số file', 'Ghi chú'])
     .appendRow([new Date(), action, email, count, note]);
+}
+
+function progress_(msg) {
+  notify_(msg);
+  SpreadsheetApp.flush();
 }
 
 function notify_(msg) {
